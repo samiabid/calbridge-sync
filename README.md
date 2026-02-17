@@ -14,9 +14,9 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ![Home mobile](docs/screenshots/home-mobile.png)
 
-### Dashboard (Unauthenticated Redirect View)
+### Dashboard (Desktop)
 
-![Dashboard unauthenticated](docs/screenshots/dashboard-unauth.png)
+![Dashboard unauthenticated](https://share.cleanshot.com/0v6t5ynY)
 
 ## Features
 
