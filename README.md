@@ -16,7 +16,7 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ### Dashboard (Desktop)
 
-![Dashboard unauthenticated](https://share.cleanshot.com/0v6t5ynY)
+![Dashboard unauthenticated](https://media.cleanshot.cloud/media/99492/g0nGVAMLyVo1F0wjNDnEXfU1vKVx9dIHm91KI19n.jpeg?Expires=1771360757&Signature=O-KEPMIsEsHou7zcZkmJ4AB4a7QztRxnCSPKb9uRzkbj6fxNLnnA9FZeFx9rdNoql~L9BzVIgmkYLyr97Cu2uVgfyvOGQLTqQGt0FL43p-B3aM0KVj6hSr13gWlDJrJkParQWdK-el8B~HLGZVAQf1S5QGjqaKoKjIbf~V9-osRIXyXOul0Fx4c2IIFNL3jsBv6JTIDzXEf-xip3xhM5FkpKN2lGkbkb84nALhWEhuFl3FNQ38eOFuIMw3eSrTTtipBK5dTFOZ7VVGOpBBwTJGRcABAW-YCAPeRgb9ZJXke0z7A8M7mVcyQtUO9w7UyQN~4RqIpadeI9pgL-dre5ww__&Key-Pair-Id=K269JMAT9ZF4GZ)
 
 ## Features
 
