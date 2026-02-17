@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Calendar Sync</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #f5f7fa;
+      min-height: 100vh;
+    }
+
+    .header {
+      background: white;
+      padding: 20px 40px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .header h1 {
+      font-size: 1.5em;
+      color: #333;
+    }
+
+    .header .user-info {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .btn {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 1em;
+      text-decoration: none;
+      display: inline-block;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      background: #5568d3;
+    }
+
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #333;
+    }
+
+    .btn-secondary:hover {
+      background: #cbd5e0;
+    }
+
+    .btn-danger {
+      background: #f56565;
+    }
+
+    .btn-danger:hover {
+      background: #e53e3e;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 20px;
+    }
+
+    .section {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      margin-bottom: 30px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    }
+
+    .section h2 {
+      margin-bottom: 20px;
+      color: #333;
+    }
+
+    .sync-list {
+      margin-top: 20px;
+    }
+
+    .sync-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 15px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 20px;
+    }
+
+    .sync-info {
+      flex: 1;
+    }
+
+    .sync-info h3 {
+      color: #333;
+      margin-bottom: 5px;
+    }
+
+    .sync-info p {
+      color: #718096;
+      font-size: 0.9em;
+    }
+
+    .sync-actions {
+      display: flex;
+      gap: 10px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 0.85em;
+      font-weight: 600;
+      margin-right: 8px;
+    }
+
+    .badge-success {
+      background: #c6f6d5;
+      color: #22543d;
+    }
+
+    .badge-warning {
+      background: #feebc8;
+      color: #744210;
+    }
+
+    .badge-danger {
+      background: #fed7d7;
+      color: #822727;
+    }
+
+    .sync-settings-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px 16px;
+      padding-top: 12px;
+      border-top: 1px solid #edf2f7;
+    }
+
+    .sync-setting {
+      font-size: 0.85em;
+      color: #4a5568;
+      line-height: 1.4;
+    }
+
+    .sync-setting strong {
+      color: #2d3748;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+
+    .modal-subsection {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid #edf2f7;
+    }
+
+    .modal-subsection h3 {
+      font-size: 1rem;
+      color: #2d3748;
+      margin-bottom: 10px;
+    }
+
+    .inline-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .small-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.95em;
+      color: #2d3748;
+    }
+
+    .small-checkbox input {
+      width: auto;
+      margin: 0;
+    }
+
+    .rsvp-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+
+    .modal.active {
+      display: flex;
+    }
+
+    .modal-content {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      max-width: 600px;
+      width: 90%;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .form-group select,
+    .form-group input {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 1em;
+    }
+
+    .form-group small {
+      display: block;
+      margin-top: 5px;
+      color: #718096;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .checkbox-group input {
+      width: auto;
+      padding: 0;
+      border: none;
+    }
+
+    .sync-start-options {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .sync-start-option {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+
+    .sync-start-option input {
+      width: auto;
+      margin-top: 3px;
+      padding: 0;
+      border: none;
+    }
+
+    .sync-start-option strong {
+      display: block;
+      color: #333;
+      margin-bottom: 2px;
+    }
+
+    .sync-start-option p {
+      color: #718096;
+      font-size: 0.85em;
+      margin: 0;
+      line-height: 1.35;
+    }
+
+    .tag-input-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      min-height: 45px;
+    }
+
+    .tag {
+      background: #667eea;
+      color: white;
+      padding: 5px 10px;
+      border-radius: 15px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.9em;
+    }
+
+    .tag button {
+      background: none;
+      border: none;
+      color: white;
+      cursor: pointer;
+      font-size: 1.2em;
+      line-height: 1;
+    }
+
+    .tag-input {
+      border: none;
+      outline: none;
+      flex: 1;
+      min-width: 100px;
+      font-size: 1em;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: #718096;
+    }
+
+    .empty-state-icon {
+      font-size: 4em;
+      margin-bottom: 20px;
+    }
+
+    .color-filter {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .color-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .color-option:hover {
+      border-color: #667eea;
+    }
+
+    .color-option.selected {
+      border-color: #667eea;
+      background: #f0f4ff;
+    }
+
+    .color-dot {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 2px solid #e2e8f0;
+    }
+
+    .arrow {
+      font-size: 1.5em;
+      color: #667eea;
+      margin: 0 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>📅 Calendar Sync Dashboard</h1>
+    <div class="user-info">
+      <span><%= user.email %></span>
+      <a href="/auth/logout" class="btn btn-secondary">Logout</a>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="section">
+      <h2>Connected Google Accounts</h2>
+      <div id="accountsList" style="margin-top: 15px;">
+        <p style="color: #718096;">Loading accounts...</p>
+      </div>
+      <button class="btn" onclick="window.location='/auth/google/add-account'" style="margin-top: 15px;">
+        + Add Another Account
+      </button>
+    </div>
+
+    <div class="section">
+      <h2>Your Calendar Syncs</h2>
+      <button class="btn" onclick="openCreateModal()">+ Create New Sync</button>
+
+      <div class="sync-list" id="syncList">
+        <% if (syncs.length === 0) { %>
+          <div class="empty-state">
+            <div class="empty-state-icon">🔄</div>
+            <h3>No syncs yet</h3>
+            <p>Create your first calendar sync to get started!</p>
+          </div>
+        <% } else { %>
+          <% syncs.forEach(sync => { %>
+            <div class="sync-item">
+              <div class="sync-info">
+                <%
+                  const effectiveStatus = !sync.isActive ? 'paused' : (sync.lastSyncStatus || 'success');
+                  const statusBadgeClass =
+                    effectiveStatus === 'error'
+                      ? 'badge-danger'
+                      : effectiveStatus === 'paused'
+                        ? 'badge-warning'
+                        : 'badge-success';
+                  const statusLabel =
+                    effectiveStatus === 'error'
+                      ? 'Error'
+                      : effectiveStatus === 'paused'
+                        ? 'Paused'
+                        : 'Success';
+                  const rsvpMap = {
+                    accepted: 'Going',
+                    tentative: 'Maybe',
+                    needsAction: 'Unanswered',
+                    declined: 'No',
+                  };
+                  const rsvpStatuses = Array.isArray(sync.copyRsvpStatuses) && sync.copyRsvpStatuses.length > 0
+                    ? sync.copyRsvpStatuses
+                    : ['accepted', 'tentative', 'needsAction', 'declined'];
+                %>
+                <h3>
+                  <%= sync.sourceCalendarName %>
+                  <span class="arrow">→</span>
+                  <%= sync.targetCalendarName %>
+                  <% if (sync.isTwoWay) { %>
+                    <span class="arrow">⇄</span>
+                  <% } %>
+                </h3>
+                <p>
+                  <span class="badge <%= statusBadgeClass %>">
+                    <%= statusLabel %>
+                  </span>
+                  <% if (sync.isTwoWay) { %>
+                    Two-way sync
+                  <% } else { %>
+                    One-way sync
+                  <% } %>
+                  <% if (sync.excludedColors.length > 0) { %>
+                    • <%= sync.excludedColors.length %> colors filtered
+                  <% } %>
+                  <% if (sync.excludedKeywords.length > 0) { %>
+                    • <%= sync.excludedKeywords.length %> keywords filtered
+                  <% } %>
+                </p>
+
+                <div class="sync-settings-grid">
+                  <div class="sync-setting"><strong>Sync titles:</strong> <%= sync.syncEventTitles ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Sync description:</strong> <%= sync.syncEventDescription ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Sync location:</strong> <%= sync.syncEventLocation ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Sync meeting links:</strong> <%= sync.syncMeetingLinks ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Mark private:</strong> <%= sync.markEventPrivate ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Disable reminders:</strong> <%= sync.disableRemindersForClones ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Event identifier:</strong> <%= sync.eventIdentifier || 'None' %></div>
+                  <div class="sync-setting"><strong>Copy RSVP:</strong> <%= rsvpStatuses.map(status => rsvpMap[status] || status).join(', ') %></div>
+                  <div class="sync-setting"><strong>Sync free events:</strong> <%= sync.syncFreeEvents ? 'Yes' : 'No' %></div>
+                  <div class="sync-setting"><strong>Last detected change:</strong> <%= sync.lastDetectedChangeAt ? new Date(sync.lastDetectedChangeAt).toLocaleString() : 'Never' %></div>
+                  <div class="sync-setting"><strong>Status detail:</strong> <%= sync.lastSyncError || 'Healthy' %></div>
+                </div>
+              </div>
+              <div class="sync-actions">
+                <button class="btn btn-secondary" onclick="rerunBackfill('<%= sync.id %>')">Re-run Backfill</button>
+                <button class="btn btn-secondary" onclick="editSync('<%= sync.id %>')">Edit</button>
+                <button class="btn btn-danger" onclick="deleteSync('<%= sync.id %>')">Delete</button>
+              </div>
+            </div>
+          <% }); %>
+        <% } %>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create/Edit Sync Modal -->
+  <div class="modal" id="syncModal">
+    <div class="modal-content">
+      <h2 id="modalTitle">Create Calendar Sync</h2>
+      <form id="syncForm">
+        <div class="form-group">
+          <label>Source Calendar</label>
+          <select id="sourceCalendar" required>
+            <option value="">Loading calendars...</option>
+          </select>
+          <small>Events from this calendar will be synced</small>
+        </div>
+
+        <div class="form-group">
+          <label>Target Calendar</label>
+          <select id="targetCalendar" required>
+            <option value="">Loading calendars...</option>
+          </select>
+          <small>Events will be copied to this calendar</small>
+        </div>
+
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" id="isTwoWay" checked>
+            <label for="isTwoWay">Enable two-way sync</label>
+          </div>
+          <small>Changes in either calendar will sync to the other</small>
+        </div>
+
+        <div class="form-group">
+          <label>Initial Sync Scope</label>
+          <div class="sync-start-options">
+            <label class="sync-start-option">
+              <input type="radio" name="syncStartMode" value="new_only" checked>
+              <div>
+                <strong>Only New Events</strong>
+                <p>Starts syncing events created or updated after setup.</p>
+              </div>
+            </label>
+            <label class="sync-start-option">
+              <input type="radio" name="syncStartMode" value="past_3mo_recurring">
+              <div>
+                <strong>Include Past Recurring Events</strong>
+                <p>Backfills recurring events from up to 2 months ago, plus all present/future events.</p>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="modal-subsection">
+          <h3>Event Copy Settings</h3>
+          <div class="inline-grid">
+            <label class="small-checkbox"><input type="checkbox" id="syncEventTitles" checked> Sync event titles</label>
+            <label class="small-checkbox"><input type="checkbox" id="syncEventDescription" checked> Sync event description</label>
+            <label class="small-checkbox"><input type="checkbox" id="syncEventLocation" checked> Sync event location</label>
+            <label class="small-checkbox"><input type="checkbox" id="syncMeetingLinks" checked> Sync meeting links</label>
+            <label class="small-checkbox"><input type="checkbox" id="markEventPrivate"> Mark event as private</label>
+            <label class="small-checkbox"><input type="checkbox" id="disableRemindersForClones"> Disable reminders for clones</label>
+            <label class="small-checkbox"><input type="checkbox" id="syncFreeEvents" checked> Sync free events</label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="eventIdentifier">Event Identifier (optional)</label>
+          <input type="text" id="eventIdentifier" maxlength="120" placeholder="(Team Calendar)">
+          <small>Static text appended to destination event description</small>
+        </div>
+
+        <div class="form-group">
+          <label>Copy events with RSVP</label>
+          <div class="rsvp-grid">
+            <label class="small-checkbox"><input type="checkbox" name="copyRsvpStatus" value="accepted" checked> Going</label>
+            <label class="small-checkbox"><input type="checkbox" name="copyRsvpStatus" value="tentative" checked> Maybe</label>
+            <label class="small-checkbox"><input type="checkbox" name="copyRsvpStatus" value="needsAction" checked> Unanswered</label>
+            <label class="small-checkbox"><input type="checkbox" name="copyRsvpStatus" value="declined" checked> No</label>
+          </div>
+          <small>Events with other RSVP states will be ignored</small>
+        </div>
+
+        <div class="form-group">
+          <label>Exclude Keywords (optional)</label>
+          <div class="tag-input-container" id="keywordTags">
+            <input type="text" class="tag-input" id="keywordInput" placeholder="Type and press Enter">
+          </div>
+          <small>Events containing these keywords will not be synced</small>
+        </div>
+
+        <div class="form-group">
+          <label>Exclude Event Colors (optional)</label>
+          <div class="color-filter" id="colorFilter">
+            <!-- Colors will be populated dynamically -->
+          </div>
+          <small>Events with selected colors will not be synced</small>
+        </div>
+
+        <div style="display: flex; gap: 10px; margin-top: 30px;">
+          <button type="submit" class="btn">Create Sync</button>
+          <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    let calendars = [];
+    let keywords = [];
+    let excludedColors = [];
+    let editingSyncId = null;
+    const syncsData = <%- JSON.stringify(syncs) %>;
+    const defaultRsvpStatuses = ['accepted', 'tentative', 'needsAction', 'declined'];
+
+    // Google Calendar colors
+    const calendarColors = [
+      { id: '1', name: 'Lavender', color: '#7986cb' },
+      { id: '2', name: 'Sage', color: '#33b679' },
+      { id: '3', name: 'Grape', color: '#8e24aa' },
+      { id: '4', name: 'Flamingo', color: '#e67c73' },
+      { id: '5', name: 'Banana', color: '#f6c026' },
+      { id: '6', name: 'Tangerine', color: '#f5511d' },
+      { id: '7', name: 'Peacock', color: '#039be5' },
+      { id: '8', name: 'Graphite', color: '#616161' },
+      { id: '9', name: 'Blueberry', color: '#3f51b5' },
+      { id: '10', name: 'Basil', color: '#0b8043' },
+      { id: '11', name: 'Tomato', color: '#d60000' },
+    ];
+
+    async function loadCalendars() {
+      try {
+        const response = await fetch('/sync/calendars');
+        calendars = await response.json();
+        
+        const sourceSelect = document.getElementById('sourceCalendar');
+        const targetSelect = document.getElementById('targetCalendar');
+        
+        sourceSelect.innerHTML = '<option value="">Select a calendar</option>';
+        targetSelect.innerHTML = '<option value="">Select a calendar</option>';
+        
+        calendars.forEach(cal => {
+          const option1 = document.createElement('option');
+          option1.value = cal.id;
+          // Show account name if available
+          const displayText = cal.account 
+            ? `${cal.name} (${cal.account})${cal.primary ? ' [Primary]' : ''}`
+            : `${cal.name}${cal.primary ? ' (Primary)' : ''}`;
+          option1.textContent = displayText;
+          option1.dataset.name = cal.name;
+          option1.dataset.accountId = cal.accountId;
+          
+          const option2 = option1.cloneNode(true);
+          option2.dataset.accountId = cal.accountId;
+          
+          sourceSelect.appendChild(option1);
+          targetSelect.appendChild(option2);
+        });
+
+        return calendars;
+      } catch (error) {
+        console.error('Error loading calendars:', error);
+        alert('Failed to load calendars');
+        return [];
+      }
+    }
+
+    function initColorFilter() {
+      const container = document.getElementById('colorFilter');
+      container.innerHTML = '';
+      
+      calendarColors.forEach(color => {
+        const div = document.createElement('div');
+        div.className = 'color-option';
+        div.dataset.colorId = color.id;
+        div.onclick = () => toggleColor(color.id, div);
+        div.innerHTML = `
+          <div class="color-dot" style="background: ${color.color}"></div>
+          <span>${color.name}</span>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function toggleColor(colorId, element) {
+      const index = excludedColors.indexOf(colorId);
+      if (index > -1) {
+        excludedColors.splice(index, 1);
+        element.classList.remove('selected');
+      } else {
+        excludedColors.push(colorId);
+        element.classList.add('selected');
+      }
+    }
+
+    function initKeywordInput() {
+      const input = document.getElementById('keywordInput');
+      if (!input) return;
+      
+      input.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addKeywordFromInput();
+        }
+      });
+
+      input.addEventListener('blur', () => {
+        addKeywordFromInput();
+      });
+    }
+
+    function addKeywordFromInput() {
+      const input = document.getElementById('keywordInput');
+      if (!input) return;
+      const value = input.value.trim();
+      if (!value) return;
+
+      const exists = keywords.some((keyword) => keyword.toLowerCase() === value.toLowerCase());
+      if (!exists) {
+        keywords.push(value);
+        addKeywordTag(value);
+      }
+      input.value = '';
+    }
+
+    function addKeywordTag(keyword) {
+      const container = document.getElementById('keywordTags');
+      const input = document.getElementById('keywordInput');
+      
+      const tag = document.createElement('div');
+      tag.className = 'tag';
+      tag.innerHTML = `
+        <span>${keyword}</span>
+        <button onclick="removeKeyword('${keyword}')" type="button">×</button>
+      `;
+      
+      container.insertBefore(tag, input);
+    }
+
+    function setDefaultCopySettings() {
+      document.getElementById('syncEventTitles').checked = true;
+      document.getElementById('syncEventDescription').checked = true;
+      document.getElementById('syncEventLocation').checked = true;
+      document.getElementById('syncMeetingLinks').checked = true;
+      document.getElementById('markEventPrivate').checked = false;
+      document.getElementById('disableRemindersForClones').checked = false;
+      document.getElementById('syncFreeEvents').checked = true;
+      document.getElementById('eventIdentifier').value = '';
+      document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => {
+        input.checked = defaultRsvpStatuses.includes(input.value);
+      });
+    }
+
+    function applyCopySettings(sync) {
+      document.getElementById('syncEventTitles').checked = sync.syncEventTitles !== false;
+      document.getElementById('syncEventDescription').checked = sync.syncEventDescription !== false;
+      document.getElementById('syncEventLocation').checked = sync.syncEventLocation !== false;
+      document.getElementById('syncMeetingLinks').checked = sync.syncMeetingLinks !== false;
+      document.getElementById('markEventPrivate').checked = Boolean(sync.markEventPrivate);
+      document.getElementById('disableRemindersForClones').checked = Boolean(sync.disableRemindersForClones);
+      document.getElementById('syncFreeEvents').checked = sync.syncFreeEvents !== false;
+      document.getElementById('eventIdentifier').value = sync.eventIdentifier || '';
+
+      const selectedStatuses = Array.isArray(sync.copyRsvpStatuses) && sync.copyRsvpStatuses.length > 0
+        ? sync.copyRsvpStatuses
+        : defaultRsvpStatuses;
+
+      document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => {
+        input.checked = selectedStatuses.includes(input.value);
+      });
+    }
+
+    function getSelectedRsvpStatuses() {
+      const statuses = [];
+      document.querySelectorAll('input[name="copyRsvpStatus"]:checked').forEach((input) => {
+        statuses.push(input.value);
+      });
+      return statuses;
+    }
+
+    function removeKeyword(keyword) {
+      keywords = keywords.filter(k => k !== keyword);
+      const tags = document.querySelectorAll('.tag');
+      tags.forEach(tag => {
+        if (tag.textContent.trim().startsWith(keyword)) {
+          tag.remove();
+        }
+      });
+    }
+
+    function openCreateModal() {
+      editingSyncId = null;
+      document.getElementById('modalTitle').textContent = 'Create Calendar Sync';
+      document.querySelector('#syncForm button[type="submit"]').textContent = 'Create Sync';
+      document.getElementById('syncModal').classList.add('active');
+      loadCalendars();
+      initColorFilter();
+      initKeywordInput();
+      keywords = [];
+      excludedColors = [];
+      const defaultSyncMode = document.querySelector('input[name="syncStartMode"][value="new_only"]');
+      if (defaultSyncMode) defaultSyncMode.checked = true;
+      setDefaultCopySettings();
+      setFormDisabled(false);
+    }
+
+    function closeModal() {
+      document.getElementById('syncModal').classList.remove('active');
+      document.getElementById('syncForm').reset();
+      document.getElementById('keywordTags').innerHTML = '<input type="text" class="tag-input" id="keywordInput" placeholder="Type and press Enter">';
+      setDefaultCopySettings();
+      setFormDisabled(false);
+    }
+
+    function setFormDisabled(disabled) {
+      document.getElementById('sourceCalendar').disabled = disabled;
+      document.getElementById('targetCalendar').disabled = disabled;
+      document.getElementById('isTwoWay').disabled = disabled;
+      document.querySelectorAll('input[name="syncStartMode"]').forEach((el) => {
+        el.disabled = disabled;
+      });
+    }
+
+    async function editSync(id) {
+      const sync = syncsData.find(s => s.id === id);
+      if (!sync) return;
+
+      editingSyncId = id;
+      document.getElementById('modalTitle').textContent = 'Edit Sync Settings';
+      document.querySelector('#syncForm button[type="submit"]').textContent = 'Save Changes';
+      document.getElementById('syncModal').classList.add('active');
+
+      await loadCalendars();
+      initColorFilter();
+      initKeywordInput();
+
+      // Populate selections (view-only for calendars and two-way setting)
+      document.getElementById('sourceCalendar').value = sync.sourceCalendarId;
+      document.getElementById('targetCalendar').value = sync.targetCalendarId;
+      document.getElementById('isTwoWay').checked = sync.isTwoWay;
+
+      // Populate filters
+      keywords = [...(sync.excludedKeywords || [])];
+      excludedColors = [...(sync.excludedColors || [])];
+
+      // Render keyword tags
+      keywords.forEach(addKeywordTag);
+
+      // Select excluded colors
+      excludedColors.forEach(colorId => {
+        const option = document.querySelector(`.color-option[data-color-id="${colorId}"]`);
+        if (option) option.classList.add('selected');
+      });
+
+      applyCopySettings(sync);
+
+      setFormDisabled(true);
+    }
+
+    document.getElementById('syncForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      addKeywordFromInput();
+      
+      const sourceSelect = document.getElementById('sourceCalendar');
+      const targetSelect = document.getElementById('targetCalendar');
+      
+      const isEdit = Boolean(editingSyncId);
+      const commonSettings = {
+        excludedKeywords: keywords,
+        excludedColors: excludedColors,
+        syncEventTitles: document.getElementById('syncEventTitles').checked,
+        syncEventDescription: document.getElementById('syncEventDescription').checked,
+        syncEventLocation: document.getElementById('syncEventLocation').checked,
+        syncMeetingLinks: document.getElementById('syncMeetingLinks').checked,
+        markEventPrivate: document.getElementById('markEventPrivate').checked,
+        disableRemindersForClones: document.getElementById('disableRemindersForClones').checked,
+        eventIdentifier: document.getElementById('eventIdentifier').value.trim(),
+        copyRsvpStatuses: getSelectedRsvpStatuses(),
+        syncFreeEvents: document.getElementById('syncFreeEvents').checked,
+      };
+      if (commonSettings.copyRsvpStatuses.length === 0) {
+        alert('Select at least one RSVP status to copy.');
+        return;
+      }
+      const data = isEdit
+        ? commonSettings
+        : {
+            sourceCalendarId: sourceSelect.value,
+            sourceCalendarName: sourceSelect.options[sourceSelect.selectedIndex].dataset.name,
+            targetCalendarId: targetSelect.value,
+            targetCalendarName: targetSelect.options[targetSelect.selectedIndex].dataset.name,
+            googleAccountId: sourceSelect.options[sourceSelect.selectedIndex].dataset.accountId,
+            targetGoogleAccountId: targetSelect.options[targetSelect.selectedIndex].dataset.accountId,
+            isTwoWay: document.getElementById('isTwoWay').checked,
+            syncStartMode: document.querySelector('input[name="syncStartMode"]:checked')?.value || 'new_only',
+            ...commonSettings,
+          };
+
+      try {
+        const response = await fetch(isEdit ? `/sync/${editingSyncId}/filters` : '/sync', {
+          method: isEdit ? 'PATCH' : 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+
+        if (response.ok) {
+          closeModal();
+          location.reload();
+        } else {
+          let message = isEdit ? 'Failed to update sync' : 'Failed to create sync';
+          try {
+            const body = await response.json();
+            if (body?.error) message = body.error;
+          } catch (_) {
+            // ignore JSON parse errors
+          }
+          alert(message);
+        }
+      } catch (error) {
+        console.error(isEdit ? 'Error updating sync:' : 'Error creating sync:', error);
+        alert(isEdit ? 'Failed to update sync' : 'Failed to create sync');
+      }
+    });
+
+    async function deleteSync(id) {
+      const dialog = document.createElement('div');
+      dialog.className = 'modal active';
+      dialog.innerHTML = `
+        <div class="modal-content">
+          <h2>Delete Sync</h2>
+          <p>What would you like to do with synced events?</p>
+          <div class="form-group" style="margin-top: 20px;">
+            <div style="display: flex; gap: 10px;">
+              <button class="btn btn-danger" style="flex: 1;" onclick="confirmDelete('${id}', true)">
+                Delete Events from Calendars
+              </button>
+              <button class="btn btn-secondary" style="flex: 1;" onclick="confirmDelete('${id}', false)">
+                Keep Events in Calendars
+              </button>
+              <button class="btn btn-secondary" style="flex: 1;" onclick="this.closest('.modal').remove()">
+                Cancel
+              </button>
+            </div>
+          </div>
+          <p style="margin-top: 15px; color: #718096; font-size: 0.9em;">
+            <strong>Delete Events:</strong> Removes synced events from destination calendars<br>
+            <strong>Keep Events:</strong> Events remain in calendars, only removes sync configuration
+          </p>
+        </div>
+      `;
+      document.body.appendChild(dialog);
+    }
+
+    async function rerunBackfill(id) {
+      try {
+        const response = await fetch(`/sync/${id}/rerun-backfill`, {
+          method: 'POST',
+        });
+
+        if (response.ok) {
+          alert('Backfill started in the background.');
+          return;
+        }
+
+        let message = 'Failed to start backfill';
+        try {
+          const body = await response.json();
+          if (body?.error) message = body.error;
+        } catch (_) {
+          // ignore JSON parse errors
+        }
+        alert(message);
+      } catch (error) {
+        console.error('Error starting backfill:', error);
+        alert('Failed to start backfill');
+      }
+    }
+
+    async function confirmDelete(id, deleteEvents) {
+      try {
+        const response = await fetch(`/sync/${id}`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deleteEvents })
+        });
+        if (response.ok) {
+          location.reload();
+        } else {
+          alert('Failed to delete sync');
+        }
+      } catch (error) {
+        console.error('Error deleting sync:', error);
+        alert('Failed to delete sync');
+      }
+    }
+
+    async function loadAccounts() {
+      try {
+        const response = await fetch('/sync/accounts');
+        const accounts = await response.json();
+        
+        const accountsList = document.getElementById('accountsList');
+        
+        if (accounts.length === 0) {
+          accountsList.innerHTML = '<p style="color: #718096;">No accounts connected yet.</p>';
+          return;
+        }
+
+        accountsList.innerHTML = accounts.map(acc => `
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px;">
+            <div>
+              <strong>${acc.displayName}</strong>
+              ${acc.isPrimary ? '<span class="badge badge-success">Primary</span>' : ''}
+              <p style="color: #718096; font-size: 0.85em; margin: 5px 0 0 0;">Connected on ${new Date(acc.createdAt).toLocaleDateString()}</p>
+            </div>
+            ${!acc.isPrimary ? `<button class="btn btn-danger" onclick="deleteAccount('${acc.id}')">Remove</button>` : ''}
+          </div>
+        `).join('');
+      } catch (error) {
+        console.error('Error loading accounts:', error);
+        document.getElementById('accountsList').innerHTML = '<p style="color: #e53e3e;">Failed to load accounts</p>';
+      }
+    }
+
+    async function deleteAccount(accountId) {
+      if (!confirm('Are you sure? This will delete all syncs using this account.')) return;
+
+      try {
+        const response = await fetch(`/sync/accounts/${accountId}`, { method: 'DELETE' });
+        if (response.ok) {
+          location.reload();
+        } else {
+          alert('Failed to delete account');
+        }
+      } catch (error) {
+        console.error('Error deleting account:', error);
+        alert('Failed to delete account');
+      }
+    }
+
+    // Load accounts and calendars on page load
+    document.addEventListener('DOMContentLoaded', () => {
+      loadAccounts();
+      loadCalendars();
+    });
+  </script>
+</body>
+</html>

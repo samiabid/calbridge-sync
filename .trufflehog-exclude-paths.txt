@@ -1,0 +1,2 @@
+^\.env\.example$
+^QUICK_REFERENCE\.md$

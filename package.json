@@ -1,0 +1,50 @@
+{
+  "name": "calendar-sync-app",
+  "version": "1.0.0",
+  "description": "Two-way Google Calendar sync application",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "prisma generate && tsc",
+    "start": "node dist/server.js",
+    "migrate:prod": "node scripts/migrate-with-retry.js",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "db:generate": "prisma generate",
+    "railway:bootstrap": "bash scripts/railway-bootstrap.sh",
+    "scan:secrets:gitleaks": "gitleaks git . --no-banner --redact",
+    "scan:secrets:trufflehog": "trufflehog git file://. --no-update --results=verified,unknown --fail --exclude-paths .trufflehog-exclude-paths.txt",
+    "scan:secrets": "npm run scan:secrets:gitleaks && npm run scan:secrets:trufflehog",
+    "tokens:encrypt": "tsx src/scripts/encryptStoredTokens.ts",
+    "postinstall": "prisma generate"
+  },
+  "keywords": ["calendar", "sync", "google-calendar"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "express": "^4.18.2",
+    "ejs": "^3.1.10",
+    "googleapis": "^128.0.0",
+    "dotenv": "^16.3.1",
+    "express-session": "^1.17.3",
+    "connect-pg-simple": "^9.0.1",
+    "uuid": "^9.0.1",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/express-session": "^1.17.10",
+    "@types/connect-pg-simple": "^7.0.3",
+    "@types/node": "^20.10.5",
+    "@types/node-cron": "^3.0.11",
+    "@types/uuid": "^9.0.7",
+    "prisma": "^5.22.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,141 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  accessToken   String
+  refreshToken  String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  syncs         Sync[]
+  googleAccounts GoogleAccount[]
+}
+
+model GoogleAccount {
+  id            String    @id @default(uuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  displayName   String    // e.g., "sami@gmail.com"
+  accessToken   String
+  refreshToken  String
+  
+  isPrimary     Boolean   @default(false) // First connected account
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  primarySyncs  Sync[]    @relation("PrimaryAccount")
+  sourceSyncs   Sync[]    @relation("SourceAccount")
+  targetSyncs   Sync[]    @relation("TargetAccount")
+  
+  @@unique([userId, displayName])
+  @@index([userId])
+}
+
+model Sync {
+  id                String   @id @default(uuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  googleAccountId       String
+  googleAccount         GoogleAccount @relation("PrimaryAccount", fields: [googleAccountId], references: [id], onDelete: Cascade)
+
+  sourceGoogleAccountId String?
+  sourceGoogleAccount   GoogleAccount? @relation("SourceAccount", fields: [sourceGoogleAccountId], references: [id], onDelete: Cascade)
+
+  targetGoogleAccountId String?
+  targetGoogleAccount   GoogleAccount? @relation("TargetAccount", fields: [targetGoogleAccountId], references: [id], onDelete: Cascade)
+  
+  // Source calendar
+  sourceCalendarId  String
+  sourceCalendarName String
+  
+  // Target calendar
+  targetCalendarId  String
+  targetCalendarName String
+  
+  // Sync settings
+  isTwoWay          Boolean  @default(true)
+  isActive          Boolean  @default(true)
+  
+  // Filtering options
+  excludedColors    String[] // Array of color IDs to exclude
+  excludedKeywords  String[] // Array of keywords to exclude
+
+  // Copy options
+  syncEventTitles            Boolean  @default(true)
+  syncEventDescription       Boolean  @default(true)
+  syncEventLocation          Boolean  @default(true)
+  syncMeetingLinks           Boolean  @default(true)
+  markEventPrivate           Boolean  @default(false)
+  disableRemindersForClones  Boolean  @default(false)
+  eventIdentifier            String?
+  copyRsvpStatuses           String[] @default([])
+  syncFreeEvents             Boolean  @default(true)
+
+  // Health / observability
+  lastDetectedChangeAt  DateTime?
+  lastSyncStatus        String    @default("idle")
+  lastSyncError         String?
+  
+  // Webhook info
+  sourceChannelId   String?
+  sourceResourceId  String?
+  sourceExpiration  DateTime?
+  
+  targetChannelId   String?
+  targetResourceId  String?
+  targetExpiration  DateTime?
+  
+  accountDetectionAttempts Int @default(0) // Track attempts to auto-detect target account
+  invalidGrantFailures  Int @default(0) // Auto-disable sync after repeated token revoke failures
+  sourceUpdatedMin  DateTime?
+  targetUpdatedMin  DateTime?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  syncedEvents      SyncedEvent[]
+  
+  @@unique([sourceCalendarId, targetCalendarId, userId, sourceGoogleAccountId, targetGoogleAccountId])
+  @@index([sourceGoogleAccountId])
+  @@index([targetGoogleAccountId])
+}
+
+model SyncedEvent {
+  id                String   @id @default(uuid())
+  syncId            String
+  sync              Sync     @relation(fields: [syncId], references: [id], onDelete: Cascade)
+  
+  // Original event info
+  sourceEventId     String
+  sourceCalendarId  String
+  
+  // Synced event info
+  targetEventId     String
+  targetCalendarId  String
+  
+  // Metadata
+  lastSyncedAt      DateTime @default(now())
+  createdAt         DateTime @default(now())
+  
+  @@unique([sourceEventId, targetEventId, syncId])
+  @@index([syncId])
+  @@index([sourceEventId])
+  @@index([targetEventId])
+}
+
+model Session {
+  sid    String   @id
+  sess   Json
+  expire DateTime
+
+  @@index([expire])
+}

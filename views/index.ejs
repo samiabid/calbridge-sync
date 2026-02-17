@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Calendar Sync - Two-way Google Calendar Sync</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .container {
+      background: white;
+      border-radius: 20px;
+      padding: 60px 40px;
+      max-width: 600px;
+      width: 100%;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      text-align: center;
+    }
+
+    h1 {
+      font-size: 2.5em;
+      color: #333;
+      margin-bottom: 10px;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 1.2em;
+      margin-bottom: 40px;
+    }
+
+    .features {
+      text-align: left;
+      margin: 40px 0;
+      padding: 0 20px;
+    }
+
+    .feature {
+      display: flex;
+      align-items: center;
+      margin: 20px 0;
+      color: #555;
+      font-size: 1.1em;
+    }
+
+    .feature::before {
+      content: "✓";
+      display: inline-block;
+      width: 30px;
+      height: 30px;
+      background: #667eea;
+      color: white;
+      border-radius: 50%;
+      text-align: center;
+      line-height: 30px;
+      margin-right: 15px;
+      font-weight: bold;
+    }
+
+    .btn {
+      background: #667eea;
+      color: white;
+      border: none;
+      padding: 15px 40px;
+      font-size: 1.2em;
+      border-radius: 50px;
+      cursor: pointer;
+      transition: all 0.3s;
+      text-decoration: none;
+      display: inline-block;
+      margin-top: 20px;
+    }
+
+    .btn:hover {
+      background: #5568d3;
+      transform: translateY(-2px);
+      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .logo {
+      font-size: 3em;
+      margin-bottom: 20px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">📅</div>
+    <h1>Calendar Sync</h1>
+    <p class="subtitle">Two-way Google Calendar synchronization</p>
+
+    <div class="features">
+      <div class="feature">Two-way sync between multiple calendars</div>
+      <div class="feature">Real-time updates with webhooks</div>
+      <div class="feature">Filter by event colors</div>
+      <div class="feature">Filter by keywords</div>
+      <div class="feature">Choose specific calendars to sync</div>
+      <div class="feature">Privacy-focused and secure</div>
+    </div>
+
+    <% if (user) { %>
+      <a href="/dashboard" class="btn">Go to Dashboard</a>
+    <% } else { %>
+      <a href="/auth/google" class="btn">Connect with Google</a>
+    <% } %>
+  </div>
+</body>
+</html>

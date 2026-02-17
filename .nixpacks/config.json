@@ -1,0 +1,6 @@
+{
+  "setup": ["nodejs_22", "npm-9_x", "openssl"],
+  "install": ["npm ci"],
+  "build": ["npm run db:generate && npm run build"],
+  "start": "npm run migrate:prod && npm run start"
+}
