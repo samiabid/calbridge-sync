@@ -1,6 +1,6 @@
 # Calendar Sync App
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/6GeBmy?referralCode=q_ltY0&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/calendar-sync?referralCode=q_ltY0&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 A two-way Google Calendar synchronization application that allows you to sync events between multiple Google calendars in real-time, with advanced filtering options.
 
