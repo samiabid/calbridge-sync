@@ -826,6 +826,22 @@
       });
     }
 
+    function selectCalendarOption(selectElement, calendarId, accountId) {
+      if (!selectElement || !calendarId) return;
+
+      const options = Array.from(selectElement.options);
+      const exactMatch = options.find((option) =>
+        option.value === calendarId && (!accountId || option.dataset.accountId === accountId)
+      );
+      const fallbackMatch = options.find((option) => option.value === calendarId);
+      const selectedOption = exactMatch || fallbackMatch;
+      if (!selectedOption) return;
+
+      options.forEach((option) => {
+        option.selected = option === selectedOption;
+      });
+    }
+
     async function editSync(id) {
       const sync = syncsData.find(s => s.id === id);
       if (!sync) return;
@@ -840,8 +856,10 @@
       initKeywordInput();
 
       // Populate selections (view-only for calendars and two-way setting)
-      document.getElementById('sourceCalendar').value = sync.sourceCalendarId;
-      document.getElementById('targetCalendar').value = sync.targetCalendarId;
+      const sourceAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
+      const targetAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
+      selectCalendarOption(document.getElementById('sourceCalendar'), sync.sourceCalendarId, sourceAccountId);
+      selectCalendarOption(document.getElementById('targetCalendar'), sync.targetCalendarId, targetAccountId);
       document.getElementById('isTwoWay').checked = sync.isTwoWay;
 
       // Populate filters

@@ -252,6 +252,27 @@ Railway will automatically build and deploy your app. Once deployed, click the g
 - Ensure Calendar API is enabled
 - Check OAuth consent screen is configured
 
+### Known Issues and Field Fixes (March 2026)
+
+- Edit modal shows wrong source account (for example, `[freeBusyReader]`) even after re-auth.
+  - Cause: the same calendar can appear under multiple connected accounts, and older UI selection matched only by `calendarId`.
+  - Fix: deploy a version that selects edit options by both `calendarId` and `accountId`, then hard refresh the dashboard.
+- Events get copied as `Busy`/blank title or are skipped with "no visible details".
+  - Cause: selected source account has `freeBusyReader` access (or event privacy hides details).
+  - Fix: reconnect/select a source account with at least `reader` access to the source calendar and verify the sync points to that account (`sourceGoogleAccountId`).
+  - Current behavior: placeholder summaries like `busy`, `no title`, `untitled` are treated as non-copyable and safely skipped.
+- Need to clean up previously bad cloned events in destination.
+  - Safe approach: only delete events in the destination calendar that were created by this sync (`privateExtendedProperty syncId=<SYNC_ID>`) and only from a chosen start date.
+  - Do not run broad calendar deletes; always scope by both destination calendar ID and sync ID.
+
+### Deploy Checklist for These Fixes
+
+- Pull latest `main` and deploy.
+- Confirm Railway `web` service is healthy after deploy.
+- Re-auth any disconnected Google account.
+- Re-run backfill from dashboard for affected syncs.
+- Verify logs show `Created synced event` and no mass `freeBusyReader` skips for the affected sync.
+
 ## Development
 
 ```bash
