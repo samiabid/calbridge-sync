@@ -17,12 +17,14 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
 ];
 
-export function getAuthUrl(state: string) {
+export function getAuthUrl(state: string, options?: { forceConsent?: boolean; loginHint?: string }) {
   const oauth2Client = createOAuth2Client();
   return oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
-    prompt: 'consent',
+    include_granted_scopes: true,
+    ...(options?.forceConsent ? { prompt: 'consent' } : {}),
+    ...(options?.loginHint ? { login_hint: options.loginHint } : {}),
     state,
   });
 }
