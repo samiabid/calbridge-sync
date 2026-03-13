@@ -1,78 +1,180 @@
 import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import { setupWebhook } from './webhook';
+import { logError, logInfo } from './logger';
 
 const prisma = new PrismaClient();
+const WEBHOOK_RENEWAL_SCHEDULE = '0 2 * * *';
 
-export function setupWebhookRenewal() {
-  // Run every day at 2 AM
-  cron.schedule('0 2 * * *', async () => {
-    console.log('Running webhook renewal check...');
+type WebhookRenewalState = 'not_scheduled' | 'scheduled' | 'running' | 'healthy' | 'error';
 
-    try {
-      // Find syncs with webhooks expiring in the next 2 days
-      const expiringDate = new Date();
-      expiringDate.setDate(expiringDate.getDate() + 2);
+interface WebhookRenewalStatus {
+  status: WebhookRenewalState;
+  schedule: string;
+  scheduledAt: string | null;
+  lastStartedAt: string | null;
+  lastFinishedAt: string | null;
+  lastSucceededAt: string | null;
+  lastFailedAt: string | null;
+  lastError: string | null;
+  lastRunSummary: string | null;
+}
 
-      const syncs = await prisma.sync.findMany({
-        where: {
-          isActive: true,
-          OR: [
-            {
-              sourceExpiration: {
-                lte: expiringDate,
-              },
-            },
-            {
-              targetExpiration: {
-                lte: expiringDate,
-              },
-            },
-          ],
-        },
-      });
+const webhookRenewalStatus: WebhookRenewalStatus = {
+  status: 'not_scheduled',
+  schedule: WEBHOOK_RENEWAL_SCHEDULE,
+  scheduledAt: null,
+  lastStartedAt: null,
+  lastFinishedAt: null,
+  lastSucceededAt: null,
+  lastFailedAt: null,
+  lastError: null,
+  lastRunSummary: null,
+};
 
-      console.log(`Found ${syncs.length} syncs with expiring webhooks`);
+function setWebhookRenewalStatus(
+  updates: Partial<WebhookRenewalStatus>
+) {
+  Object.assign(webhookRenewalStatus, updates);
+}
 
-      for (const sync of syncs) {
-        try {
-          // Renew source webhook
-          if (sync.sourceExpiration && sync.sourceExpiration <= expiringDate) {
-            console.log(`Renewing source webhook for sync ${sync.id}`);
-            await setupWebhook(
-              sync.id,
-              sync.userId,
-              sync.sourceGoogleAccountId || sync.googleAccountId,
-              sync.sourceCalendarId,
-              'source'
-            );
-          }
+export function getWebhookRenewalStatus(): WebhookRenewalStatus {
+  return { ...webhookRenewalStatus };
+}
 
-          // Renew target webhook if two-way sync
-          if (
-            sync.isTwoWay &&
-            sync.targetExpiration &&
-            sync.targetExpiration <= expiringDate
-          ) {
-            console.log(`Renewing target webhook for sync ${sync.id}`);
-            await setupWebhook(
-              sync.id,
-              sync.userId,
-              sync.targetGoogleAccountId || sync.googleAccountId,
-              sync.targetCalendarId,
-              'target'
-            );
-          }
-        } catch (error) {
-          console.error(`Error renewing webhooks for sync ${sync.id}:`, error);
-        }
-      }
-
-      console.log('Webhook renewal check completed');
-    } catch (error) {
-      console.error('Error in webhook renewal cron job:', error);
-    }
+export async function runWebhookRenewalCheck() {
+  const startedAt = new Date();
+  setWebhookRenewalStatus({
+    status: 'running',
+    lastStartedAt: startedAt.toISOString(),
+    lastError: null,
+  });
+  logInfo('webhook_renewal_started', {
+    startedAt: startedAt.toISOString(),
   });
 
-  console.log('📡 Webhook renewal cron job scheduled (daily at 2 AM)');
+  try {
+    // Find syncs with webhooks expiring in the next 2 days
+    const expiringDate = new Date();
+    expiringDate.setDate(expiringDate.getDate() + 2);
+
+    const syncs = await prisma.sync.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          {
+            sourceExpiration: {
+              lte: expiringDate,
+            },
+          },
+          {
+            targetExpiration: {
+              lte: expiringDate,
+            },
+          },
+        ],
+      },
+    });
+
+    logInfo('webhook_renewal_expiring_syncs_loaded', {
+      syncCount: syncs.length,
+    });
+
+    let renewedCount = 0;
+    let failedCount = 0;
+
+    for (const sync of syncs) {
+      try {
+        // Renew source webhook
+        if (sync.sourceExpiration && sync.sourceExpiration <= expiringDate) {
+          logInfo('webhook_renewal_source_renewing', {
+            syncId: sync.id,
+            calendarId: sync.sourceCalendarId,
+            direction: 'source',
+          });
+          await setupWebhook(
+            sync.id,
+            sync.userId,
+            sync.sourceGoogleAccountId || sync.googleAccountId,
+            sync.sourceCalendarId,
+            'source'
+          );
+          renewedCount += 1;
+        }
+
+        // Renew target webhook if two-way sync
+        if (
+          sync.isTwoWay &&
+          sync.targetExpiration &&
+          sync.targetExpiration <= expiringDate
+        ) {
+          logInfo('webhook_renewal_target_renewing', {
+            syncId: sync.id,
+            calendarId: sync.targetCalendarId,
+            direction: 'target',
+          });
+          await setupWebhook(
+            sync.id,
+            sync.userId,
+            sync.targetGoogleAccountId || sync.googleAccountId,
+            sync.targetCalendarId,
+            'target'
+          );
+          renewedCount += 1;
+        }
+      } catch (error: any) {
+        failedCount += 1;
+        logError('webhook_renewal_sync_failed', {
+          syncId: sync.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const finishedAt = new Date();
+    setWebhookRenewalStatus({
+      status: failedCount > 0 ? 'error' : 'healthy',
+      lastFinishedAt: finishedAt.toISOString(),
+      lastSucceededAt: failedCount > 0 ? webhookRenewalStatus.lastSucceededAt : finishedAt.toISOString(),
+      lastFailedAt: failedCount > 0 ? finishedAt.toISOString() : webhookRenewalStatus.lastFailedAt,
+      lastError: failedCount > 0 ? `${failedCount} sync renewal(s) failed` : null,
+      lastRunSummary: `expiringSyncs=${syncs.length}, renewed=${renewedCount}, failed=${failedCount}`,
+    });
+    logInfo('webhook_renewal_completed', {
+      expiringSyncs: syncs.length,
+      renewedCount,
+      failedCount,
+      status: webhookRenewalStatus.status,
+    });
+  } catch (error: any) {
+    const finishedAt = new Date();
+    const message = error instanceof Error ? error.message : String(error);
+    setWebhookRenewalStatus({
+      status: 'error',
+      lastFinishedAt: finishedAt.toISOString(),
+      lastFailedAt: finishedAt.toISOString(),
+      lastError: message,
+      lastRunSummary: 'renewal_cron_failed',
+    });
+    logError('webhook_renewal_failed', {
+      error: message,
+    });
+  }
+}
+
+export function setupWebhookRenewal() {
+  setWebhookRenewalStatus({
+    status: 'scheduled',
+    scheduledAt: new Date().toISOString(),
+    lastError: null,
+    lastRunSummary: null,
+  });
+
+  cron.schedule(WEBHOOK_RENEWAL_SCHEDULE, async () => {
+    await runWebhookRenewalCheck();
+  });
+
+  logInfo('webhook_renewal_scheduled', {
+    schedule: WEBHOOK_RENEWAL_SCHEDULE,
+  });
 }

@@ -7,10 +7,12 @@ import authRoutes from './routes/auth';
 import syncRoutes from './routes/sync';
 import webhookRoutes from './routes/webhook';
 import dashboardRoutes from './routes/dashboard';
+import healthRoutes from './routes/health';
 import { setupWebhookRenewal } from './services/webhookRenewal';
 import { ensureSyncColumns } from './services/schema';
 import { isTokenEncryptionEnabled } from './services/tokenCrypto';
 import { getPublicBaseUrl } from './config/runtime';
+import { logError, logInfo, logWarn } from './services/logger';
 
 dotenv.config();
 
@@ -25,11 +27,11 @@ if (isProduction && !sessionSecret) {
 }
 
 if (isProduction && !isTokenEncryptionEnabled()) {
-  console.warn('TOKEN_ENCRYPTION_KEY is not set; OAuth tokens will be stored in plaintext');
+  logWarn('token_encryption_not_configured');
 }
 
 if (isProduction && !getPublicBaseUrl()) {
-  console.warn('PUBLIC_URL is not set and Railway public domain is unavailable; webhook/OAuth callbacks may fail');
+  logWarn('public_url_not_configured');
 }
 
 // Required when running behind Railway proxy so secure cookies work correctly.
@@ -67,6 +69,7 @@ app.use('/auth', authRoutes);
 app.use('/sync', syncRoutes);
 app.use('/webhook', webhookRoutes);
 app.use('/dashboard', dashboardRoutes);
+app.use('/', healthRoutes);
 
 app.get('/', (req, res) => {
   res.render('index', { user: req.session.userId });
@@ -80,11 +83,15 @@ async function startServer() {
 
   // Start server
   app.listen(PORT, () => {
-    console.log(`🚀 Calendar Sync App running on http://localhost:${PORT}`);
-    console.log(`📅 Two-way Google Calendar sync ready!`);
+    logInfo('server_started', {
+      port: Number(PORT),
+      environment: process.env.NODE_ENV || 'development',
+    });
   });
 }
 
 startServer().catch((error) => {
-  console.error('Failed to start server:', error);
+  logError('server_start_failed', {
+    error: error instanceof Error ? error.message : String(error),
+  });
 });
