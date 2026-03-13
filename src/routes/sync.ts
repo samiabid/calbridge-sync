@@ -15,9 +15,37 @@ import {
   retrySyncFailure,
 } from '../services/syncRecovery';
 import { resolveSyncFailureById } from '../services/syncAudit';
+import {
+  cleanupSyncOrphanClone,
+  runSyncReconciliation,
+  scanSyncOrphanClones,
+} from '../services/syncRepair';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+function getAccountStatusReason(error: unknown): string {
+  const err = error as any;
+  const rawMessage =
+    err?.response?.data?.error_description ||
+    err?.response?.data?.error?.message ||
+    err?.message ||
+    'Authorization failed';
+  const message = String(rawMessage);
+  const normalized = message.toLowerCase();
+
+  if (normalized.includes('invalid_grant')) {
+    return 'Refresh token expired or revoked';
+  }
+  if (normalized.includes('invalid credentials')) {
+    return 'Access token is no longer valid';
+  }
+  if (normalized.includes('insufficient')) {
+    return 'Missing required Google permissions';
+  }
+
+  return message;
+}
 
 // Get all syncs for user
 router.get('/', requireAuth, async (req, res) => {
@@ -75,6 +103,48 @@ router.post('/failures/:failureId/resolve', requireAuth, async (req, res) => {
   }
 });
 
+router.post('/:id/reconcile', requireAuth, async (req, res) => {
+  try {
+    const result = await runSyncReconciliation(req.params.id, req.session.userId!, {
+      daysBack: req.body?.daysBack,
+      daysForward: req.body?.daysForward,
+    });
+    res.json(result);
+  } catch (error: any) {
+    const message = error?.message || 'Failed to run reconciliation';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.get('/:id/orphans', requireAuth, async (req, res) => {
+  try {
+    const result = await scanSyncOrphanClones(req.params.id, req.session.userId!, {
+      daysBack: req.query?.daysBack,
+      daysForward: req.query?.daysForward,
+    });
+    res.json(result);
+  } catch (error: any) {
+    const message = error?.message || 'Failed to scan orphan clones';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post('/:id/orphans/cleanup', requireAuth, async (req, res) => {
+  try {
+    await cleanupSyncOrphanClone(req.params.id, req.session.userId!, {
+      direction: req.body?.direction,
+      targetEventId: req.body?.targetEventId,
+      targetCalendarId: req.body?.targetCalendarId,
+      sourceEventId: req.body?.sourceEventId,
+      eventSummary: req.body?.eventSummary,
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to clean orphan clone';
+    res.status(400).json({ error: message });
+  }
+});
+
 // Get user's Google accounts
 router.get('/accounts', requireAuth, async (req, res) => {
   try {
@@ -82,7 +152,28 @@ router.get('/accounts', requireAuth, async (req, res) => {
       where: { userId: req.session.userId! },
       select: { id: true, displayName: true, isPrimary: true, createdAt: true },
     });
-    res.json(accounts);
+
+    const accountsWithStatus = await Promise.all(
+      accounts.map(async (account) => {
+        try {
+          const calendar = await getAuthenticatedCalendar(req.session.userId!, account.id);
+          await calendar.calendarList.list({ maxResults: 1 });
+          return {
+            ...account,
+            connectionStatus: 'connected' as const,
+            statusReason: null,
+          };
+        } catch (error) {
+          return {
+            ...account,
+            connectionStatus: 'disconnected' as const,
+            statusReason: getAccountStatusReason(error),
+          };
+        }
+      })
+    );
+
+    res.json(accountsWithStatus);
   } catch (error) {
     console.error('Error fetching accounts:', error);
     res.status(500).json({ error: 'Failed to fetch accounts' });

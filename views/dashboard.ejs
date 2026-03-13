@@ -203,6 +203,39 @@
       margin-top: 14px;
     }
 
+    .repair-panel {
+      margin-top: 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .repair-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 18px;
+      background: #f8fafc;
+    }
+
+    .repair-item h3 {
+      color: #2d3748;
+      margin-bottom: 8px;
+    }
+
+    .repair-summary {
+      color: #4a5568;
+      font-size: 0.95em;
+      margin-bottom: 12px;
+    }
+
+    .repair-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px 16px;
+      color: #4a5568;
+      font-size: 0.9em;
+      margin-top: 10px;
+    }
+
     .modal-subsection {
       margin-top: 18px;
       padding-top: 14px;
@@ -531,6 +564,8 @@
               </div>
               <div class="sync-actions">
                 <button class="btn btn-secondary" onclick="rerunBackfill('<%= sync.id %>')">Re-run Backfill</button>
+                <button class="btn btn-secondary" onclick="reconcileSync('<%= sync.id %>')">Reconcile</button>
+                <button class="btn btn-secondary" onclick="scanOrphans('<%= sync.id %>')">Scan Orphans</button>
                 <button class="btn btn-secondary" onclick="editSync('<%= sync.id %>')">Edit</button>
                 <button class="btn btn-danger" onclick="deleteSync('<%= sync.id %>')">Delete</button>
               </div>
@@ -575,6 +610,16 @@
           <% }) %>
         </div>
       <% } %>
+    </div>
+
+    <div class="section">
+      <h2>Repair Tools</h2>
+      <p style="color: #718096;">
+        Run bounded reconciliation or scan for orphaned sync-tagged clones without touching unrelated calendar events.
+      </p>
+      <div id="repairResults" class="repair-panel">
+        <p style="color: #718096;">No repair scan has been run yet.</p>
+      </div>
     </div>
   </div>
 
@@ -686,6 +731,8 @@
     let keywords = [];
     let excludedColors = [];
     let editingSyncId = null;
+    let latestRepairCandidates = [];
+    let latestRepairSyncId = null;
     const syncsData = <%- JSON.stringify(syncs) %>;
     const defaultRsvpStatuses = ['accepted', 'tentative', 'needsAction', 'declined'];
 
@@ -719,9 +766,10 @@
           const option1 = document.createElement('option');
           option1.value = cal.id;
           // Show account name if available
+          const roleLabel = cal.accessRole ? ` [${cal.accessRole}]` : '';
           const displayText = cal.account 
-            ? `${cal.name} (${cal.account})${cal.primary ? ' [Primary]' : ''}`
-            : `${cal.name}${cal.primary ? ' (Primary)' : ''}`;
+            ? `${cal.name} (${cal.account})${cal.primary ? ' [Primary]' : ''}${roleLabel}`
+            : `${cal.name}${cal.primary ? ' (Primary)' : ''}${roleLabel}`;
           option1.textContent = displayText;
           option1.dataset.name = cal.name;
           option1.dataset.accountId = cal.accountId;
@@ -1070,6 +1118,140 @@
       }
     }
 
+    function getSyncName(id) {
+      const sync = syncsData.find((item) => item.id === id);
+      if (!sync) return 'Unknown sync';
+      return `${sync.sourceCalendarName} -> ${sync.targetCalendarName}`;
+    }
+
+    async function reconcileSync(id) {
+      if (!confirm('Run bounded reconciliation for this sync? This will reprocess events from the last 30 days through the next 365 days.')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`/sync/${id}/reconcile`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+
+        const body = await response.json();
+        if (!response.ok) {
+          alert(body?.error || 'Failed to run reconciliation');
+          return;
+        }
+
+        const directionSummary = (body.directions || [])
+          .map((item) => `${item.direction}: processed=${item.processed}, synced=${item.synced}, deleted=${item.deleted}, failed=${item.failed}`)
+          .join('\n');
+        alert(`Reconciliation finished for ${getSyncName(id)}.\n\n${directionSummary}`);
+        location.reload();
+      } catch (error) {
+        console.error('Error running reconciliation:', error);
+        alert('Failed to run reconciliation');
+      }
+    }
+
+    async function scanOrphans(id) {
+      const panel = document.getElementById('repairResults');
+      panel.innerHTML = '<p style="color: #718096;">Scanning sync-tagged target events...</p>';
+
+      try {
+        const response = await fetch(`/sync/${id}/orphans`);
+        const body = await response.json();
+
+        if (!response.ok) {
+          panel.innerHTML = `<p style="color: #e53e3e;">${body?.error || 'Failed to scan orphan clones'}</p>`;
+          return;
+        }
+
+        renderRepairResults(id, body);
+      } catch (error) {
+        console.error('Error scanning orphans:', error);
+        panel.innerHTML = '<p style="color: #e53e3e;">Failed to scan orphan clones</p>';
+      }
+    }
+
+    function renderRepairResults(syncId, data) {
+      const panel = document.getElementById('repairResults');
+      const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+      latestRepairSyncId = syncId;
+      latestRepairCandidates = candidates;
+      const windowLabel = data?.window
+        ? `${data.window.daysBack}d back / ${data.window.daysForward}d forward`
+        : 'default window';
+
+      if (candidates.length === 0) {
+        panel.innerHTML = `
+          <div class="repair-item">
+            <h3>${getSyncName(syncId)}</h3>
+            <p class="repair-summary">No orphaned sync-tagged target events found in the ${windowLabel} window.</p>
+            <div class="repair-meta">
+              <div><strong>Scanned target events:</strong> ${data?.scannedTargetEvents || 0}</div>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      panel.innerHTML = `
+        <div class="repair-item">
+          <h3>${getSyncName(syncId)}</h3>
+          <p class="repair-summary">Found ${candidates.length} orphan candidate(s) in the ${windowLabel} window.</p>
+          <div class="repair-meta">
+            <div><strong>Scanned target events:</strong> ${data?.scannedTargetEvents || 0}</div>
+          </div>
+        </div>
+        ${candidates.map((candidate, index) => `
+          <div class="repair-item">
+            <h3>${candidate.targetSummary || candidate.targetEventId}</h3>
+            <div class="repair-meta">
+              <div><strong>Direction:</strong> ${candidate.direction}</div>
+              <div><strong>Reason:</strong> ${candidate.reasonMessage}</div>
+              <div><strong>Target Event:</strong> ${candidate.targetEventId}</div>
+              <div><strong>Source Event:</strong> ${candidate.sourceEventId || 'Unknown'}</div>
+            </div>
+            <div class="failure-actions">
+              <button class="btn btn-danger" onclick="cleanupOrphanCandidateByIndex(${index})">
+                Delete Orphan Clone
+              </button>
+            </div>
+          </div>
+        `).join('')}
+      `;
+    }
+
+    async function cleanupOrphanCandidateByIndex(index) {
+      const candidate = latestRepairCandidates[index];
+      const syncId = latestRepairSyncId;
+      if (!candidate || !syncId) return;
+
+      if (!confirm('Delete this orphaned sync-tagged target event? Only the selected sync clone will be removed.')) {
+        return;
+      }
+
+      try {
+        const response = await fetch(`/sync/${syncId}/orphans/cleanup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(candidate),
+        });
+
+        const body = await response.json();
+        if (!response.ok) {
+          alert(body?.error || 'Failed to delete orphan clone');
+          return;
+        }
+
+        alert('Orphan clone deleted.');
+        await scanOrphans(syncId);
+      } catch (error) {
+        console.error('Error deleting orphan clone:', error);
+        alert('Failed to delete orphan clone');
+      }
+    }
+
     async function confirmDelete(id, deleteEvents) {
       try {
         const response = await fetch(`/sync/${id}`, {
@@ -1149,17 +1331,32 @@
         accountsList.innerHTML = accounts.map(acc => `
           <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px;">
             <div>
-              <strong>${acc.displayName}</strong>
-              ${acc.isPrimary ? '<span class="badge badge-success">Primary</span>' : ''}
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <strong>${acc.displayName}</strong>
+                ${acc.isPrimary ? '<span class="badge badge-success">Primary</span>' : ''}
+                <span class="badge ${acc.connectionStatus === 'connected' ? 'badge-success' : 'badge-danger'}">
+                  ${acc.connectionStatus === 'connected' ? 'Connected' : 'Disconnected'}
+                </span>
+              </div>
               <p style="color: #718096; font-size: 0.85em; margin: 5px 0 0 0;">Connected on ${new Date(acc.createdAt).toLocaleDateString()}</p>
+              ${acc.connectionStatus === 'disconnected' && acc.statusReason
+                ? `<p style="color: #c53030; font-size: 0.85em; margin: 5px 0 0 0;">Issue: ${acc.statusReason}</p>`
+                : ''}
             </div>
-            ${!acc.isPrimary ? `<button class="btn btn-danger" onclick="deleteAccount('${acc.id}')">Remove</button>` : ''}
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <button class="btn btn-secondary" onclick="reauthAccount('${acc.id}')">Re-authenticate</button>
+              ${!acc.isPrimary ? `<button class="btn btn-danger" onclick="deleteAccount('${acc.id}')">Remove</button>` : ''}
+            </div>
           </div>
         `).join('');
       } catch (error) {
         console.error('Error loading accounts:', error);
         document.getElementById('accountsList').innerHTML = '<p style="color: #e53e3e;">Failed to load accounts</p>';
       }
+    }
+
+    function reauthAccount(accountId) {
+      window.location = `/auth/google/reauth/${accountId}`;
     }
 
     async function deleteAccount(accountId) {

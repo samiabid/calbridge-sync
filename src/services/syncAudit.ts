@@ -8,6 +8,7 @@ export type SyncAction =
   | 'update'
   | 'delete'
   | 'skip'
+  | 'reconcile'
   | 'retry'
   | 'force_resync'
   | 'cleanup';
