@@ -5,10 +5,18 @@ import { syncEvent, handleEventDeletion } from './sync';
 import { withRateLimitRetry } from './rateLimit';
 import { getPublicBaseUrl } from '../config/runtime';
 import { recordSyncAudit, type SyncDirection } from './syncAudit';
+import {
+  ALLOWED_RSVP_STATUSES,
+  buildCancellationState,
+  getEventSelfResponseStatus,
+  getRecurringSeriesId,
+  normalizeRsvpStatuses,
+  shouldSkipActiveEventDueToCancellation,
+  shouldSkipEvent,
+} from './syncLogic';
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
-const ALLOWED_RSVP_STATUSES = ['accepted', 'tentative', 'needsAction', 'declined'] as const;
 type RsvpStatus = (typeof ALLOWED_RSVP_STATUSES)[number];
 
 function isInvalidGrantError(error: any): boolean {
@@ -19,33 +27,6 @@ function isInvalidGrantError(error: any): boolean {
 
 function isSyncMissingError(error: any): boolean {
   return error?.code === 'SYNC_MISSING' || error?.code === 'P2025';
-}
-
-function normalizeRsvpStatuses(input: unknown): RsvpStatus[] {
-  if (!Array.isArray(input)) return [...ALLOWED_RSVP_STATUSES];
-
-  const valid = input
-    .filter((status): status is RsvpStatus =>
-      typeof status === 'string' &&
-      (ALLOWED_RSVP_STATUSES as readonly string[]).includes(status)
-    );
-
-  if (valid.length === 0) {
-    return [...ALLOWED_RSVP_STATUSES];
-  }
-
-  return [...new Set(valid)];
-}
-
-function getEventSelfResponseStatus(event: any): RsvpStatus {
-  const selfAttendee = Array.isArray(event?.attendees)
-    ? event.attendees.find((attendee: any) => attendee?.self)
-    : null;
-  const status = selfAttendee?.responseStatus;
-
-  return (ALLOWED_RSVP_STATUSES as readonly string[]).includes(status)
-    ? (status as RsvpStatus)
-    : 'accepted';
 }
 
 async function recordInvalidGrantFailure(syncId: string, context: string): Promise<boolean> {
@@ -126,6 +107,27 @@ async function findWorkingAccountForCalendar(
         () => calendar.calendars.get({ calendarId }),
         `finding working account for calendar ${calendarId}`
       );
+      try {
+        const listEntry = await withRateLimitRetry(
+          () => calendar.calendarList.get({ calendarId }),
+          `checking fallback account visibility for calendar ${calendarId}`
+        );
+        if (listEntry.data.accessRole === 'freeBusyReader') {
+          console.warn(
+            `Skipping fallback account ${account.displayName} for calendar ${calendarId}: free/busy-only access`
+          );
+          continue;
+        }
+      } catch (listError: any) {
+        const status = listError?.code || listError?.response?.status;
+        if (status === 404) {
+          console.warn(
+            `Skipping fallback account ${account.displayName} for calendar ${calendarId}: visibility unknown (calendarList entry missing)`
+          );
+          continue;
+        }
+        throw listError;
+      }
       return { accountId: account.id, calendar };
     } catch {
       continue;
@@ -133,18 +135,6 @@ async function findWorkingAccountForCalendar(
   }
 
   return null;
-}
-
-function getRecurringSeriesId(event: any): string | undefined {
-  if (event?.recurringEventId && typeof event.recurringEventId === 'string') {
-    return event.recurringEventId;
-  }
-
-  if (typeof event?.id !== 'string') return undefined;
-  const index = event.id.indexOf('_');
-  if (index <= 0) return undefined;
-
-  return event.id.slice(0, index);
 }
 
 export async function setupWebhook(
@@ -375,8 +365,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       }
     }
 
-    const cancelledEventIds = new Set<string>();
-    const cancelledSeriesCounts = new Map<string, number>();
+    const cancellationState = buildCancellationState(events);
     let hadProcessingError = false;
     let lastProcessingError = '';
     let lastDetectedChangeAt: Date | null = null;
@@ -390,20 +379,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       }
 
       if (event?.status !== 'cancelled' || !event?.id) continue;
-      cancelledEventIds.add(event.id);
-      const recurringSeriesId = getRecurringSeriesId(event);
-      if (!recurringSeriesId) continue;
-      cancelledSeriesCounts.set(
-        recurringSeriesId,
-        (cancelledSeriesCounts.get(recurringSeriesId) || 0) + 1
-      );
     }
-
-    const bulkCancelledSeriesIds = new Set(
-      Array.from(cancelledSeriesCounts.entries())
-        .filter(([, count]) => count > 1)
-        .map(([seriesId]) => seriesId)
-    );
 
     for (const event of events) {
       if (!event.id) continue;
@@ -416,7 +392,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           const recurringSeriesId = getRecurringSeriesId(event);
           const isBulkSeriesCancellation = Boolean(
             recurringSeriesId &&
-              (cancelledSeriesCounts.get(recurringSeriesId) || 0) > 1
+              cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
           );
           await handleEventDeletion(
             sync.id,
@@ -433,8 +409,8 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           continue;
         }
 
-        const recurringSeriesId = getRecurringSeriesId(event);
-        if (cancelledEventIds.has(event.id)) {
+        if (shouldSkipActiveEventDueToCancellation(event, cancellationState)) {
+          const recurringSeriesId = getRecurringSeriesId(event);
           console.log(`Skipping active event ${event.id} because a cancelled version is present in the same delta window`);
           await recordSyncAudit({
             syncId: sync.id,
@@ -445,24 +421,14 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
             sourceEventId: event.id,
             sourceCalendarId,
             eventSummary: event.summary || null,
-            reasonCode: 'cancelled_in_same_delta',
-            reasonMessage: 'Active event skipped because a cancelled version exists in the same delta window',
-          });
-          continue;
-        }
-        if (recurringSeriesId && bulkCancelledSeriesIds.has(recurringSeriesId)) {
-          console.log(`Skipping active event ${event.id} because series ${recurringSeriesId} is being bulk-cancelled`);
-          await recordSyncAudit({
-            syncId: sync.id,
-            userId: sync.userId,
-            direction,
-            action: 'skip',
-            result: 'skipped',
-            sourceEventId: event.id,
-            sourceCalendarId,
-            eventSummary: event.summary || null,
-            reasonCode: 'series_bulk_cancelled',
-            reasonMessage: 'Active event skipped because recurring series is bulk-cancelled in the same delta window',
+            reasonCode:
+              recurringSeriesId && cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
+                ? 'series_bulk_cancelled'
+                : 'cancelled_in_same_delta',
+            reasonMessage:
+              recurringSeriesId && cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
+                ? 'Active event skipped because recurring series is bulk-cancelled in the same delta window'
+                : 'Active event skipped because a cancelled version exists in the same delta window',
           });
           continue;
         }
@@ -503,7 +469,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           targetCalendarId,
           writeAccountId,
           false,
-          undefined,
+          listAccountId,
           direction
         );
       } catch (eventError) {
@@ -552,39 +518,4 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
     );
     console.error('Error processing webhook notification:', error);
   }
-}
-
-function shouldSkipEvent(
-  event: any,
-  excludedColors: string[],
-  excludedKeywords: string[],
-  syncFreeEvents: boolean,
-  copyRsvpStatuses: string[]
-): boolean {
-  if (event.colorId && excludedColors.includes(event.colorId)) {
-    return true;
-  }
-
-  const text = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-  for (const keyword of excludedKeywords) {
-    if (text.includes(keyword.toLowerCase())) {
-      return true;
-    }
-  }
-
-  if (event.extendedProperties?.private?.syncId) {
-    return true;
-  }
-
-  if (!syncFreeEvents && event.transparency === 'transparent') {
-    return true;
-  }
-
-  const allowedStatuses = normalizeRsvpStatuses(copyRsvpStatuses);
-  const responseStatus = getEventSelfResponseStatus(event);
-  if (!allowedStatuses.includes(responseStatus)) {
-    return true;
-  }
-
-  return false;
 }

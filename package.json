@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "prisma generate && tsc",
+    "test": "node --import tsx --test src/tests/**/*.test.ts",
     "start": "node dist/server.js",
     "migrate:prod": "node scripts/migrate-with-retry.js",
     "db:push": "prisma db push",

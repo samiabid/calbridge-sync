@@ -9,12 +9,21 @@ import {
   resolveSyncFailureByContext,
   type SyncDirection,
 } from './syncAudit';
+import {
+  ALLOWED_RSVP_STATUSES,
+  eventHasAnyCopyableDetails,
+  getEventMeetingLink,
+  getEventSelfResponseStatus,
+  isDetailPlaceholderSummary,
+  needsReadableSourceDetails,
+  normalizeRsvpStatuses,
+  shouldSkipEvent,
+} from './syncLogic';
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
 const INITIAL_SYNC_PAST_MONTHS = 2;
 const BACKFILL_PER_EVENT_DELAY_MS = 200;
-const ALLOWED_RSVP_STATUSES = ['accepted', 'tentative', 'needsAction', 'declined'] as const;
 type RsvpStatus = (typeof ALLOWED_RSVP_STATUSES)[number];
 
 export type SyncStartMode = 'new_only' | 'past_3mo_recurring';
@@ -148,46 +157,6 @@ async function clearInvalidGrantFailures(syncId: string) {
   });
 }
 
-function normalizeRsvpStatuses(input: unknown): RsvpStatus[] {
-  if (!Array.isArray(input)) return [...ALLOWED_RSVP_STATUSES];
-
-  const valid = input
-    .filter((status): status is RsvpStatus =>
-      typeof status === 'string' &&
-      (ALLOWED_RSVP_STATUSES as readonly string[]).includes(status)
-    );
-
-  if (valid.length === 0) {
-    return [...ALLOWED_RSVP_STATUSES];
-  }
-
-  return [...new Set(valid)];
-}
-
-function getEventSelfResponseStatus(event: any): RsvpStatus {
-  const selfAttendee = Array.isArray(event?.attendees)
-    ? event.attendees.find((attendee: any) => attendee?.self)
-    : null;
-  const status = selfAttendee?.responseStatus;
-
-  return (ALLOWED_RSVP_STATUSES as readonly string[]).includes(status)
-    ? (status as RsvpStatus)
-    : 'accepted';
-}
-
-function getEventMeetingLink(event: any): string | null {
-  if (typeof event?.hangoutLink === 'string' && event.hangoutLink.trim().length > 0) {
-    return event.hangoutLink.trim();
-  }
-
-  const entryPoint = Array.isArray(event?.conferenceData?.entryPoints)
-    ? event.conferenceData.entryPoints.find(
-        (entry: any) => typeof entry?.uri === 'string' && entry.uri.trim().length > 0
-      )
-    : null;
-
-  return entryPoint?.uri?.trim() || null;
-}
 
 function getNormalizedEventIdentifier(settings: SyncCopySettings): string | null {
   if (!settings.eventIdentifier) return null;
@@ -233,7 +202,7 @@ function buildTargetEventRequestBody(
   const eventIdentifier = getNormalizedEventIdentifier(settings);
   const useIdentifierAsSummary = !settings.syncEventTitles && Boolean(eventIdentifier);
   const summary = settings.syncEventTitles
-    ? event.summary
+    ? (typeof event?.summary === 'string' && event.summary.trim().length > 0 ? event.summary : 'Busy')
     : eventIdentifier || 'Busy';
 
   return {
@@ -271,6 +240,25 @@ async function assertCalendarAccess(
       () => calendar.calendars.get({ calendarId }),
       `verifying ${role.toLowerCase()} calendar access`
     );
+
+    if (role === 'Source') {
+      try {
+        const listEntry = await withRateLimitRetry(
+          () => calendar.calendarList.get({ calendarId }),
+          `verifying source calendar visibility level`
+        );
+        if (listEntry.data.accessRole === 'freeBusyReader') {
+          throw new Error(
+            'Source calendar is shared as free/busy only for the selected account. Choose an account with full event visibility (Reader/Writer/Owner) to copy titles, descriptions, and meeting links.'
+          );
+        }
+      } catch (innerError: any) {
+        const status = getErrorStatus(innerError);
+        if (status !== 404) {
+          throw innerError;
+        }
+      }
+    }
   } catch (error: any) {
     if (isInvalidGrantError(error)) {
       throw new Error(
@@ -674,7 +662,9 @@ export async function performInitialSync(
           event,
           sync.sourceCalendarId,
           sync.targetCalendarId,
-          targetAccountId
+          targetAccountId,
+          false,
+          sourceAccountId
         );
         syncedCount += 1;
         if (BACKFILL_PER_EVENT_DELAY_MS > 0) {
@@ -786,7 +776,9 @@ export async function syncEvent(
     syncFreeEvents: syncRecord.syncFreeEvents,
   };
 
-  console.log(`syncEvent called for sync ${syncId}: targetGoogleAccountId=${targetGoogleAccountId || 'null'}, targetCalendar=${targetCalendarId}`);
+  console.log(
+    `syncEvent called for sync ${syncId}: sourceGoogleAccountId=${sourceGoogleAccountId || 'null'}, targetGoogleAccountId=${targetGoogleAccountId || 'null'}, targetCalendar=${targetCalendarId}`
+  );
 
   // If targetGoogleAccountId is not provided (old syncs), try to find the account that has access
   // But limit attempts to prevent excessive API calls
@@ -855,6 +847,34 @@ export async function syncEvent(
 
   if (!calendar) {
     throw new Error(`No writable calendar client available for sync ${syncId}`);
+  }
+
+  event = await hydrateSourceEventIfMissingDetails(
+    syncId,
+    userId,
+    event,
+    sourceCalendarId,
+    sourceGoogleAccountId,
+    copySettings
+  );
+
+  if (needsReadableSourceDetails(copySettings) && !eventHasAnyCopyableDetails(event)) {
+    console.warn(
+      `Skipping source event ${event.id} for sync ${syncId}: no readable details available after hydration.`
+    );
+    await recordSyncAudit({
+      syncId,
+      userId,
+      direction,
+      action: 'skip',
+      result: 'skipped',
+      sourceEventId: event.id,
+      sourceCalendarId,
+      eventSummary: event.summary || null,
+      reasonCode: 'no_readable_details',
+      reasonMessage: 'Source event had no readable details after hydration',
+    });
+    return;
   }
 
   if (
@@ -963,7 +983,7 @@ export async function syncEvent(
               targetCalendarId,
               undefined,
               true,
-              undefined,
+              sourceGoogleAccountId,
               direction
             );
             return;
@@ -1062,7 +1082,7 @@ export async function syncEvent(
           targetCalendarId,
           undefined,
           true,
-          undefined,
+          sourceGoogleAccountId,
           direction
         );
         return;
@@ -1081,6 +1101,55 @@ export async function syncEvent(
       });
       throw error;
     }
+  }
+}
+
+async function hydrateSourceEventIfMissingDetails(
+  syncId: string,
+  userId: string,
+  event: any,
+  sourceCalendarId: string,
+  sourceGoogleAccountId: string | undefined,
+  settings: SyncCopySettings
+) {
+  const needsReadableDetails = needsReadableSourceDetails(settings);
+
+  if (!needsReadableDetails || !event?.id || eventHasAnyCopyableDetails(event)) {
+    return event;
+  }
+
+  if (!sourceGoogleAccountId) {
+    return event;
+  }
+
+  try {
+    const sourceCalendar = await getAuthenticatedCalendar(userId, sourceGoogleAccountId);
+    const fullEvent = await withRateLimitRetry(
+      () =>
+        sourceCalendar.events.get({
+          calendarId: sourceCalendarId,
+          eventId: event.id,
+        }),
+      `hydrating source event details for sync ${syncId}`
+    );
+
+    const hydrated = {
+      ...event,
+      ...fullEvent.data,
+    };
+
+    if (!eventHasAnyCopyableDetails(hydrated)) {
+      console.warn(
+        `Source event ${event.id} for sync ${syncId} still has no visible details after hydration. Source account may only have free/busy access.`
+      );
+    }
+
+    return hydrated;
+  } catch (error: any) {
+    console.warn(
+      `Failed to hydrate source event ${event.id} details for sync ${syncId}: ${error?.message || error}`
+    );
+    return event;
   }
 }
 
@@ -1299,43 +1368,4 @@ export async function handleEventDeletion(
       console.log(`Deleted synced event ${syncedEvent.sourceEventId}`);
     }
   }
-}
-
-function shouldSkipEvent(
-  event: any,
-  excludedColors: string[],
-  excludedKeywords: string[],
-  syncFreeEvents: boolean,
-  copyRsvpStatuses: string[]
-): boolean {
-  // Check color filter
-  if (event.colorId && excludedColors.includes(event.colorId)) {
-    return true;
-  }
-
-  // Check keyword filter
-  const text = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-  for (const keyword of excludedKeywords) {
-    if (text.includes(keyword.toLowerCase())) {
-      return true;
-    }
-  }
-
-  // Skip events that were created by sync (to prevent loops)
-  if (event.extendedProperties?.private?.syncId) {
-    return true;
-  }
-
-  // Skip free events when disabled.
-  if (!syncFreeEvents && event.transparency === 'transparent') {
-    return true;
-  }
-
-  const allowedStatuses = normalizeRsvpStatuses(copyRsvpStatuses);
-  const responseStatus = getEventSelfResponseStatus(event);
-  if (!allowedStatuses.includes(responseStatus)) {
-    return true;
-  }
-
-  return false;
 }
