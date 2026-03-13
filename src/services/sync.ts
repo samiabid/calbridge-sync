@@ -3,6 +3,12 @@ import { v4 as uuidv4 } from 'uuid';
 import { getAuthenticatedCalendar } from './calendar';
 import { setupWebhook, stopWebhook } from './webhook';
 import { isRateLimitError, sleepMs, withRateLimitRetry } from './rateLimit';
+import {
+  recordSyncAudit,
+  recordSyncFailure,
+  resolveSyncFailureByContext,
+  type SyncDirection,
+} from './syncAudit';
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
@@ -46,6 +52,11 @@ interface CreateSyncParams {
   eventIdentifier: string | null;
   copyRsvpStatuses: string[];
   syncFreeEvents: boolean;
+}
+
+function getErrorCode(error: any): string | null {
+  const code = error?.code || error?.status || error?.response?.status;
+  return code === undefined || code === null ? null : String(code);
 }
 
 function getErrorStatus(error: any): number | undefined {
@@ -733,7 +744,9 @@ export async function syncEvent(
   sourceCalendarId: string,
   targetCalendarId: string,
   targetGoogleAccountId?: string,
-  hasRetriedWithAutoDetection: boolean = false
+  hasRetriedWithAutoDetection: boolean = false,
+  sourceGoogleAccountId?: string,
+  direction: SyncDirection = 'source_to_target'
 ) {
   let calendar: Awaited<ReturnType<typeof getAuthenticatedCalendar>> | null = null;
   let selectedAccountId = targetGoogleAccountId;
@@ -854,6 +867,18 @@ export async function syncEvent(
     )
   ) {
     console.log(`Skipping event ${event.id} (${event.summary}) due to sync filters`);
+    await recordSyncAudit({
+      syncId,
+      userId,
+      direction,
+      action: 'skip',
+      result: 'skipped',
+      sourceEventId: event.id,
+      sourceCalendarId,
+      eventSummary: event.summary || null,
+      reasonCode: 'filtered',
+      reasonMessage: 'Event skipped by sync filters',
+    });
     return;
   }
 
@@ -885,6 +910,25 @@ export async function syncEvent(
         data: { lastSyncedAt: new Date() },
       });
       await clearInvalidGrantFailures(syncId);
+      await resolveSyncFailureByContext({
+        syncId,
+        direction,
+        action: 'update',
+        sourceEventId: event.id,
+        targetEventId: existingSync.targetEventId,
+      });
+      await recordSyncAudit({
+        syncId,
+        userId,
+        direction,
+        action: 'update',
+        result: 'success',
+        sourceEventId: event.id,
+        sourceCalendarId,
+        targetEventId: existingSync.targetEventId,
+        targetCalendarId,
+        eventSummary: event.summary || null,
+      });
 
       console.log(`Updated event ${event.id} in target calendar`);
     } catch (error: any) {
@@ -898,7 +942,8 @@ export async function syncEvent(
             sourceCalendarId,
             targetCalendarId,
             selectedAccountId,
-            copySettings
+            copySettings,
+            direction
           );
         } catch (createError: any) {
           if (
@@ -917,10 +962,25 @@ export async function syncEvent(
               sourceCalendarId,
               targetCalendarId,
               undefined,
-              true
+              true,
+              undefined,
+              direction
             );
             return;
           }
+          await recordSyncFailure({
+            syncId,
+            userId,
+            direction,
+            action: 'create',
+            sourceEventId: event.id,
+            sourceCalendarId,
+            targetEventId: existingSync.targetEventId,
+            targetCalendarId,
+            eventSummary: event.summary || null,
+            errorCode: getErrorCode(createError),
+            errorMessage: createError instanceof Error ? createError.message : String(createError),
+          });
           throw createError;
         }
       } else if (isCredentialOrAccessError(error) && !isSyncMissingError(error)) {
@@ -939,8 +999,34 @@ export async function syncEvent(
           { targetGoogleAccountId: null, accountDetectionAttempts: 0 },
           true
         );
+        await recordSyncFailure({
+          syncId,
+          userId,
+          direction,
+          action: 'update',
+          sourceEventId: event.id,
+          sourceCalendarId,
+          targetEventId: existingSync.targetEventId,
+          targetCalendarId,
+          eventSummary: event.summary || null,
+          errorCode: getErrorCode(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       } else {
+        await recordSyncFailure({
+          syncId,
+          userId,
+          direction,
+          action: 'update',
+          sourceEventId: event.id,
+          sourceCalendarId,
+          targetEventId: existingSync.targetEventId,
+          targetCalendarId,
+          eventSummary: event.summary || null,
+          errorCode: getErrorCode(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       }
     }
@@ -955,7 +1041,8 @@ export async function syncEvent(
         sourceCalendarId,
         targetCalendarId,
         selectedAccountId,
-        copySettings
+        copySettings,
+        direction
       );
     } catch (error: any) {
       if (
@@ -974,10 +1061,24 @@ export async function syncEvent(
           sourceCalendarId,
           targetCalendarId,
           undefined,
-          true
+          true,
+          undefined,
+          direction
         );
         return;
       }
+      await recordSyncFailure({
+        syncId,
+        userId,
+        direction,
+        action: 'create',
+        sourceEventId: event.id,
+        sourceCalendarId,
+        targetCalendarId,
+        eventSummary: event.summary || null,
+        errorCode: getErrorCode(error),
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       throw error;
     }
   }
@@ -990,7 +1091,8 @@ async function createSyncedEvent(
   sourceCalendarId: string,
   targetCalendarId: string,
   targetGoogleAccountId?: string,
-  settings?: SyncCopySettings
+  settings?: SyncCopySettings,
+  direction: SyncDirection = 'source_to_target'
 ) {
   console.log(`createSyncedEvent: syncId=${syncId}, targetCalendar=${targetCalendarId}, accountId=${targetGoogleAccountId || 'null'}`);
   const calendar = await getAuthenticatedCalendar(userId, targetGoogleAccountId);
@@ -1030,6 +1132,25 @@ async function createSyncedEvent(
       },
     });
     await clearInvalidGrantFailures(syncId);
+    await resolveSyncFailureByContext({
+      syncId,
+      direction,
+      action: 'create',
+      sourceEventId: event.id,
+      targetEventId: response.data.id!,
+    });
+    await recordSyncAudit({
+      syncId,
+      userId,
+      direction,
+      action: 'create',
+      result: 'success',
+      sourceEventId: event.id,
+      sourceCalendarId,
+      targetEventId: response.data.id!,
+      targetCalendarId,
+      eventSummary: event.summary || null,
+    });
 
     console.log(`Created synced event ${event.id} -> ${response.data.id}`);
   } catch (error: any) {
@@ -1063,7 +1184,8 @@ export async function handleEventDeletion(
   options?: {
     recurringEventId?: string;
     isBulkSeriesCancellation?: boolean;
-  }
+  },
+  direction: SyncDirection = 'source_to_target'
 ) {
   const syncedEventsToDelete = await prisma.syncedEvent.findMany({
     where: {
@@ -1104,6 +1226,17 @@ export async function handleEventDeletion(
     console.log(
       `No synced mapping found for cancelled event ${eventId} on sync ${syncId} (source calendar ${sourceCalendarId})`
     );
+    await recordSyncAudit({
+      syncId,
+      userId,
+      direction,
+      action: 'delete',
+      result: 'skipped',
+      sourceEventId: eventId,
+      sourceCalendarId,
+      reasonCode: 'no_mapping',
+      reasonMessage: 'No synced mapping found for cancelled event',
+    });
     return;
   }
 
@@ -1128,11 +1261,41 @@ export async function handleEventDeletion(
         shouldDeleteMapping = true;
       } else {
         console.error(`Error deleting synced event ${eventId}:`, error);
+        await recordSyncFailure({
+          syncId,
+          userId,
+          direction,
+          action: 'delete',
+          sourceEventId: eventId,
+          sourceCalendarId,
+          targetEventId: syncedEvent.targetEventId,
+          targetCalendarId: syncedEvent.targetCalendarId,
+          errorCode: getErrorCode(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
       }
     }
 
     if (shouldDeleteMapping) {
       await prisma.syncedEvent.delete({ where: { id: syncedEvent.id } });
+      await resolveSyncFailureByContext({
+        syncId,
+        direction,
+        action: 'delete',
+        sourceEventId: eventId,
+        targetEventId: syncedEvent.targetEventId,
+      });
+      await recordSyncAudit({
+        syncId,
+        userId,
+        direction,
+        action: 'delete',
+        result: 'success',
+        sourceEventId: eventId,
+        sourceCalendarId,
+        targetEventId: syncedEvent.targetEventId,
+        targetCalendarId: syncedEvent.targetCalendarId,
+      });
       console.log(`Deleted synced event ${syncedEvent.sourceEventId}`);
     }
   }

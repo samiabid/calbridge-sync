@@ -169,6 +169,40 @@
       margin-right: 4px;
     }
 
+    .failure-list {
+      margin-top: 20px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .failure-item {
+      border: 1px solid #fed7d7;
+      border-radius: 10px;
+      padding: 18px;
+      background: #fffaf9;
+    }
+
+    .failure-item h3 {
+      color: #2d3748;
+      margin-bottom: 8px;
+    }
+
+    .failure-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 8px 16px;
+      margin-top: 12px;
+      color: #4a5568;
+      font-size: 0.9em;
+    }
+
+    .failure-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
     .modal-subsection {
       margin-top: 18px;
       padding-top: 14px;
@@ -504,6 +538,43 @@
           <% }); %>
         <% } %>
       </div>
+    </div>
+
+    <div class="section">
+      <h2>Failed Events</h2>
+      <% if (!failedEvents || failedEvents.length === 0) { %>
+        <p style="color: #718096;">No open failed events.</p>
+      <% } else { %>
+        <div class="failure-list">
+          <% failedEvents.forEach((failure) => { %>
+            <div class="failure-item">
+              <h3><%= failure.eventSummary || failure.sourceEventId || failure.targetEventId || 'Unknown event' %></h3>
+              <p style="color: #718096; font-size: 0.9em;">
+                <span class="badge badge-danger">Open Failure</span>
+                <%= failure.sync.sourceCalendarName %> <span class="arrow">→</span> <%= failure.sync.targetCalendarName %>
+              </p>
+              <div class="failure-meta">
+                <div><strong>Action:</strong> <%= failure.action %></div>
+                <div><strong>Direction:</strong> <%= failure.direction %></div>
+                <div><strong>Last Error:</strong> <%= failure.errorMessage %></div>
+                <div><strong>Failures:</strong> <%= failure.failureCount %></div>
+                <div><strong>Manual Retries:</strong> <%= failure.retryCount %></div>
+                <div><strong>Last Failed:</strong> <%= new Date(failure.lastFailedAt).toLocaleString() %></div>
+                <div><strong>Source Event:</strong> <%= failure.sourceEventId || 'Unknown' %></div>
+                <div><strong>Target Event:</strong> <%= failure.targetEventId || 'Unknown' %></div>
+              </div>
+              <div class="failure-actions">
+                <button class="btn btn-secondary" onclick="retryFailure('<%= failure.id %>')">Retry</button>
+                <button class="btn btn-secondary" onclick="forceResyncFailure('<%= failure.id %>')">Force Re-sync</button>
+                <% if (failure.targetEventId && failure.targetCalendarId) { %>
+                  <button class="btn btn-danger" onclick="deleteStaleTarget('<%= failure.id %>')">Delete Stale Target</button>
+                <% } %>
+                <button class="btn btn-secondary" onclick="resolveFailure('<%= failure.id %>')">Mark Resolved</button>
+              </div>
+            </div>
+          <% }) %>
+        </div>
+      <% } %>
     </div>
   </div>
 
@@ -1015,6 +1086,52 @@
         console.error('Error deleting sync:', error);
         alert('Failed to delete sync');
       }
+    }
+
+    async function postFailureAction(failureId, actionPath, successMessage) {
+      try {
+        const response = await fetch(`/sync/failures/${failureId}/${actionPath}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+
+        if (response.ok) {
+          if (successMessage) alert(successMessage);
+          location.reload();
+          return;
+        }
+
+        let message = 'Failed to process failed event action';
+        try {
+          const body = await response.json();
+          if (body?.error) message = body.error;
+        } catch (_) {
+          // ignore JSON parse errors
+        }
+        alert(message);
+      } catch (error) {
+        console.error('Error processing failed event action:', error);
+        alert('Failed to process failed event action');
+      }
+    }
+
+    function retryFailure(failureId) {
+      postFailureAction(failureId, 'retry', 'Retry started.');
+    }
+
+    function forceResyncFailure(failureId) {
+      postFailureAction(failureId, 'force-resync', 'Force re-sync started.');
+    }
+
+    function deleteStaleTarget(failureId) {
+      if (!confirm('Delete the stale target clone for this failed event?')) return;
+      postFailureAction(failureId, 'delete-stale-target', 'Stale target clone deleted.');
+    }
+
+    function resolveFailure(failureId) {
+      if (!confirm('Mark this failed event as resolved?')) return;
+      postFailureAction(failureId, 'resolve', 'Failed event marked resolved.');
     }
 
     async function loadAccounts() {

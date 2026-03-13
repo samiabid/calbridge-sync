@@ -4,6 +4,7 @@ import { getAuthenticatedCalendar } from './calendar';
 import { syncEvent, handleEventDeletion } from './sync';
 import { withRateLimitRetry } from './rateLimit';
 import { getPublicBaseUrl } from '../config/runtime';
+import { recordSyncAudit, type SyncDirection } from './syncAudit';
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
@@ -247,6 +248,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
   const writeAccountId = isSourceCalendar ? targetAccountId : sourceAccountId;
   const updatedMinField = isSourceCalendar ? 'sourceUpdatedMin' : 'targetUpdatedMin';
   const listAccountField = isSourceCalendar ? 'sourceGoogleAccountId' : 'targetGoogleAccountId';
+  const direction: SyncDirection = isSourceCalendar ? 'source_to_target' : 'target_to_source';
 
   console.log(`Processing webhook for sync ${sync.id}, source: ${sourceCalendarId}`);
 
@@ -425,7 +427,8 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
             {
               recurringEventId: recurringSeriesId,
               isBulkSeriesCancellation,
-            }
+            },
+            direction
           );
           continue;
         }
@@ -433,10 +436,34 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
         const recurringSeriesId = getRecurringSeriesId(event);
         if (cancelledEventIds.has(event.id)) {
           console.log(`Skipping active event ${event.id} because a cancelled version is present in the same delta window`);
+          await recordSyncAudit({
+            syncId: sync.id,
+            userId: sync.userId,
+            direction,
+            action: 'skip',
+            result: 'skipped',
+            sourceEventId: event.id,
+            sourceCalendarId,
+            eventSummary: event.summary || null,
+            reasonCode: 'cancelled_in_same_delta',
+            reasonMessage: 'Active event skipped because a cancelled version exists in the same delta window',
+          });
           continue;
         }
         if (recurringSeriesId && bulkCancelledSeriesIds.has(recurringSeriesId)) {
           console.log(`Skipping active event ${event.id} because series ${recurringSeriesId} is being bulk-cancelled`);
+          await recordSyncAudit({
+            syncId: sync.id,
+            userId: sync.userId,
+            direction,
+            action: 'skip',
+            result: 'skipped',
+            sourceEventId: event.id,
+            sourceCalendarId,
+            eventSummary: event.summary || null,
+            reasonCode: 'series_bulk_cancelled',
+            reasonMessage: 'Active event skipped because recurring series is bulk-cancelled in the same delta window',
+          });
           continue;
         }
 
@@ -451,6 +478,18 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           )
         ) {
           console.log(`Skipping event ${event.id} (${event.summary}) - filtered out`);
+          await recordSyncAudit({
+            syncId: sync.id,
+            userId: sync.userId,
+            direction,
+            action: 'skip',
+            result: 'skipped',
+            sourceEventId: event.id,
+            sourceCalendarId,
+            eventSummary: event.summary || null,
+            reasonCode: 'filtered',
+            reasonMessage: 'Event skipped by sync filters during webhook processing',
+          });
           continue;
         }
 
@@ -462,7 +501,10 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           event,
           sourceCalendarId,
           targetCalendarId,
-          writeAccountId
+          writeAccountId,
+          false,
+          undefined,
+          direction
         );
       } catch (eventError) {
         if (isSyncMissingError(eventError)) {

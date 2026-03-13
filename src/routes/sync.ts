@@ -9,6 +9,12 @@ import {
   rerunMissedBackfill,
   type SyncStartMode,
 } from '../services/sync';
+import {
+  deleteStaleTargetClone,
+  forceResyncFailureEvent,
+  retrySyncFailure,
+} from '../services/syncRecovery';
+import { resolveSyncFailureById } from '../services/syncAudit';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -21,6 +27,51 @@ router.get('/', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error fetching syncs:', error);
     res.status(500).json({ error: 'Failed to fetch syncs' });
+  }
+});
+
+router.post('/failures/:failureId/retry', requireAuth, async (req, res) => {
+  try {
+    await retrySyncFailure(req.params.failureId, req.session.userId!);
+    res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to retry event';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post('/failures/:failureId/force-resync', requireAuth, async (req, res) => {
+  try {
+    await forceResyncFailureEvent(req.params.failureId, req.session.userId!);
+    res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to force re-sync event';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post('/failures/:failureId/delete-stale-target', requireAuth, async (req, res) => {
+  try {
+    await deleteStaleTargetClone(req.params.failureId, req.session.userId!);
+    res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to delete stale target clone';
+    res.status(400).json({ error: message });
+  }
+});
+
+router.post('/failures/:failureId/resolve', requireAuth, async (req, res) => {
+  try {
+    const note =
+      typeof req.body?.resolutionNote === 'string' ? req.body.resolutionNote.trim() : null;
+    const result = await resolveSyncFailureById(req.params.failureId, req.session.userId!, note);
+    if (result.count === 0) {
+      return res.status(404).json({ error: 'Failed event not found' });
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to resolve event';
+    res.status(400).json({ error: message });
   }
 });
 

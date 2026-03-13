@@ -16,6 +16,8 @@ model User {
   updatedAt     DateTime  @updatedAt
   syncs         Sync[]
   googleAccounts GoogleAccount[]
+  syncEventAudits SyncEventAudit[]
+  syncFailures    SyncFailure[]
 }
 
 model GoogleAccount {
@@ -103,6 +105,8 @@ model Sync {
   updatedAt         DateTime @updatedAt
   
   syncedEvents      SyncedEvent[]
+  eventAudits       SyncEventAudit[]
+  failures          SyncFailure[]
   
   @@unique([sourceCalendarId, targetCalendarId, userId, sourceGoogleAccountId, targetGoogleAccountId])
   @@index([sourceGoogleAccountId])
@@ -128,6 +132,63 @@ model SyncedEvent {
   
   @@unique([sourceEventId, targetEventId, syncId])
   @@index([syncId])
+  @@index([sourceEventId])
+  @@index([targetEventId])
+}
+
+model SyncEventAudit {
+  id               String   @id @default(uuid())
+  syncId           String
+  sync             Sync     @relation(fields: [syncId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  direction        String
+  action           String
+  result           String
+  sourceEventId    String?
+  sourceCalendarId String?
+  targetEventId    String?
+  targetCalendarId String?
+  eventSummary     String?
+  reasonCode       String?
+  reasonMessage    String?
+  createdAt        DateTime @default(now())
+
+  @@index([syncId, createdAt])
+  @@index([userId, createdAt])
+  @@index([sourceEventId])
+  @@index([targetEventId])
+}
+
+model SyncFailure {
+  id               String   @id @default(uuid())
+  dedupeKey        String   @unique
+  syncId           String
+  sync             Sync     @relation(fields: [syncId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  direction        String
+  action           String
+  status           String   @default("open")
+  sourceEventId    String?
+  sourceCalendarId String?
+  targetEventId    String?
+  targetCalendarId String?
+  eventSummary     String?
+  errorCode        String?
+  errorMessage     String
+  failureCount     Int      @default(1)
+  retryCount       Int      @default(0)
+  firstFailedAt    DateTime @default(now())
+  lastFailedAt     DateTime @default(now())
+  lastAttemptedAt  DateTime?
+  resolutionNote   String?
+  resolvedAt       DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([userId, status, lastFailedAt])
+  @@index([syncId, status, lastFailedAt])
   @@index([sourceEventId])
   @@index([targetEventId])
 }
