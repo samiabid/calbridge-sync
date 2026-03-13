@@ -373,6 +373,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       }
     }
 
+    const cancelledEventIds = new Set<string>();
     const cancelledSeriesCounts = new Map<string, number>();
     let hadProcessingError = false;
     let lastProcessingError = '';
@@ -387,6 +388,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       }
 
       if (event?.status !== 'cancelled' || !event?.id) continue;
+      cancelledEventIds.add(event.id);
       const recurringSeriesId = getRecurringSeriesId(event);
       if (!recurringSeriesId) continue;
       cancelledSeriesCounts.set(
@@ -394,6 +396,12 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
         (cancelledSeriesCounts.get(recurringSeriesId) || 0) + 1
       );
     }
+
+    const bulkCancelledSeriesIds = new Set(
+      Array.from(cancelledSeriesCounts.entries())
+        .filter(([, count]) => count > 1)
+        .map(([seriesId]) => seriesId)
+    );
 
     for (const event of events) {
       if (!event.id) continue;
@@ -419,6 +427,16 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
               isBulkSeriesCancellation,
             }
           );
+          continue;
+        }
+
+        const recurringSeriesId = getRecurringSeriesId(event);
+        if (cancelledEventIds.has(event.id)) {
+          console.log(`Skipping active event ${event.id} because a cancelled version is present in the same delta window`);
+          continue;
+        }
+        if (recurringSeriesId && bulkCancelledSeriesIds.has(recurringSeriesId)) {
+          console.log(`Skipping active event ${event.id} because series ${recurringSeriesId} is being bulk-cancelled`);
           continue;
         }
 
