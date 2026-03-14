@@ -37,6 +37,7 @@ router.get('/ready', async (_req, res) => {
     sessionConfigured: Boolean(process.env.DATABASE_URL) && Boolean(process.env.SESSION_SECRET || process.env.NODE_ENV !== 'production'),
     tokenEncryptionConfigured: isTokenEncryptionEnabled(),
     publicUrlConfigured: Boolean(getPublicBaseUrl()),
+    internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
     webhookRenewalScheduled: getWebhookRenewalStatus().status !== 'not_scheduled',
   };
 
