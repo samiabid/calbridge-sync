@@ -9,6 +9,8 @@ import {
   resolveSyncFailureByContext,
   type SyncDirection,
 } from './syncAudit';
+import { sendAlert } from './alerts';
+import { logError, logInfo, logWarn } from './logger';
 import {
   ALLOWED_RSVP_STATUSES,
   eventHasAnyCopyableDetails,
@@ -131,20 +133,53 @@ async function recordInvalidGrantFailure(syncId: string, context: string): Promi
           where: { id: syncId },
           data: { isActive: false },
         });
-        console.error(
-          `Disabled sync ${syncId} after ${sync.invalidGrantFailures} invalid_grant failures (${context})`
-        );
+        logError('sync_invalid_grant_threshold_reached', {
+          syncId,
+          invalidGrantFailures: sync.invalidGrantFailures,
+          context,
+        });
+        await sendAlert({
+          severity: 'error',
+          key: `invalid_grant_disabled:${syncId}`,
+          message: `Sync ${syncId} was disabled after repeated invalid_grant failures.`,
+          details: {
+            syncId,
+            invalidGrantFailures: sync.invalidGrantFailures,
+            context,
+          },
+          cooldownMs: 6 * 60 * 60 * 1000,
+        });
       }
       return true;
     }
 
-    console.warn(
-      `invalid_grant for sync ${syncId} (${sync.invalidGrantFailures}/${MAX_INVALID_GRANT_FAILURES}) (${context})`
-    );
+    logWarn('sync_invalid_grant_recorded', {
+      syncId,
+      invalidGrantFailures: sync.invalidGrantFailures,
+      maxInvalidGrantFailures: MAX_INVALID_GRANT_FAILURES,
+      context,
+    });
+    if (sync.invalidGrantFailures === 1) {
+      await sendAlert({
+        severity: 'warn',
+        key: `invalid_grant_warning:${syncId}`,
+        message: `Sync ${syncId} hit an invalid_grant error and may need re-authentication.`,
+        details: {
+          syncId,
+          invalidGrantFailures: sync.invalidGrantFailures,
+          context,
+        },
+        cooldownMs: 6 * 60 * 60 * 1000,
+      });
+    }
     return false;
   } catch (error: any) {
     if (error?.code !== 'P2025') {
-      console.error(`Failed to record invalid_grant failure for sync ${syncId}:`, error);
+      logError('sync_invalid_grant_record_failed', {
+        syncId,
+        context,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return true;
   }
@@ -281,7 +316,11 @@ function startInitialBackfillInBackground(
   sourceAccountId: string,
   targetAccountId: string
 ) {
-  console.log(`Starting initial backfill in background for sync ${syncId}`);
+  logInfo('initial_backfill_started', {
+    syncId,
+    sourceAccountId,
+    targetAccountId,
+  });
   void (async () => {
     try {
       await performInitialSync(
@@ -292,8 +331,21 @@ function startInitialBackfillInBackground(
         'past_3mo_recurring'
       );
     } catch (error) {
-      console.error(`Error performing initial sync for ${syncId}:`, error);
       const message = error instanceof Error ? error.message : String(error);
+      logError('initial_backfill_failed', {
+        syncId,
+        error: message,
+      });
+      await sendAlert({
+        severity: 'error',
+        key: `initial_backfill_failed:${syncId}`,
+        message: `Initial backfill failed for sync ${syncId}.`,
+        details: {
+          syncId,
+          error: message,
+        },
+        cooldownMs: 60 * 60 * 1000,
+      });
       await updateSyncIfExists(
         syncId,
         {
@@ -432,16 +484,35 @@ export async function createSync(params: CreateSyncParams) {
     if (isTwoWay) {
       await setupWebhook(sync.id, userId, targetAccountId, targetCalendarId, 'target');
     } else {
-      console.log(`One-way sync ${sync.id}: skipping target webhook setup`);
+      logInfo('sync_target_webhook_skipped_one_way', {
+        syncId: sync.id,
+      });
     }
   } catch (error: any) {
-    console.error(`Error setting up webhooks for sync ${sync.id}:`, error);
+    const message = error instanceof Error ? error.message : String(error);
+    logError('sync_webhook_setup_failed', {
+      syncId: sync.id,
+      error: message,
+    });
+    await sendAlert({
+      severity: 'error',
+      key: `sync_webhook_setup_failed:${sync.id}`,
+      message: `Webhook setup failed for sync ${sync.id}.`,
+      details: {
+        syncId: sync.id,
+        error: message,
+      },
+      cooldownMs: 60 * 60 * 1000,
+    });
 
     // Roll back partially-created syncs so users don't end up with broken setups.
     try {
       await deleteSync(sync.id, userId, false);
     } catch (cleanupError) {
-      console.error(`Failed to clean up sync ${sync.id} after webhook setup failure:`, cleanupError);
+      logError('sync_webhook_setup_cleanup_failed', {
+        syncId: sync.id,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
     }
 
     if (isInvalidGrantError(error)) {
@@ -1005,9 +1076,12 @@ export async function syncEvent(
         }
       } else if (isCredentialOrAccessError(error) && !isSyncMissingError(error)) {
         // Access/auth issue on selected account - clear so future writes can auto-detect
-        console.error(
-          `⚠ Account access issue for sync ${syncId}, will retry account detection`
-        );
+        logError('sync_account_access_issue_existing_event', {
+          syncId,
+          sourceEventId: event.id,
+          targetEventId: existingSync.targetEventId,
+          error: error instanceof Error ? error.message : String(error),
+        });
         if (isInvalidGrantError(error)) {
           const disabled = await recordInvalidGrantFailure(syncId, 'updating existing event');
           if (disabled) {
@@ -1221,13 +1295,22 @@ async function createSyncedEvent(
       eventSummary: event.summary || null,
     });
 
-    console.log(`Created synced event ${event.id} -> ${response.data.id}`);
+    logInfo('sync_target_event_created', {
+      syncId,
+      sourceEventId: event.id,
+      targetEventId: response.data.id!,
+      targetCalendarId,
+      accountId: targetGoogleAccountId || null,
+    });
   } catch (error: any) {
     if (isCredentialOrAccessError(error) && !isSyncMissingError(error)) {
       // Access/auth issue on selected account - clear so future writes can auto-detect
-      console.error(
-        `⚠ Account access issue when creating event for sync ${syncId}, will retry account detection`
-      );
+      logError('sync_account_access_issue_create_event', {
+        syncId,
+        sourceEventId: event.id,
+        targetCalendarId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (isInvalidGrantError(error)) {
         const disabled = await recordInvalidGrantFailure(syncId, 'creating synced event');
         if (disabled) {

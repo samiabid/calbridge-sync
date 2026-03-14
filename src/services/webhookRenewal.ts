@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
 import { setupWebhook } from './webhook';
+import { sendAlert } from './alerts';
 import { logError, logInfo } from './logger';
 
 const prisma = new PrismaClient();
@@ -146,6 +147,19 @@ export async function runWebhookRenewalCheck() {
       failedCount,
       status: webhookRenewalStatus.status,
     });
+    if (failedCount > 0) {
+      await sendAlert({
+        severity: 'error',
+        key: 'webhook_renewal_partial_failure',
+        message: 'Webhook renewal completed with one or more sync renewal failures.',
+        details: {
+          expiringSyncs: syncs.length,
+          renewedCount,
+          failedCount,
+        },
+        cooldownMs: 60 * 60 * 1000,
+      });
+    }
   } catch (error: any) {
     const finishedAt = new Date();
     const message = error instanceof Error ? error.message : String(error);
@@ -158,6 +172,15 @@ export async function runWebhookRenewalCheck() {
     });
     logError('webhook_renewal_failed', {
       error: message,
+    });
+    await sendAlert({
+      severity: 'error',
+      key: 'webhook_renewal_failed',
+      message: 'Webhook renewal cron job failed.',
+      details: {
+        error: message,
+      },
+      cooldownMs: 60 * 60 * 1000,
     });
   }
 }

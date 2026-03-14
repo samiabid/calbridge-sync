@@ -5,6 +5,8 @@ import { syncEvent, handleEventDeletion } from './sync';
 import { withRateLimitRetry } from './rateLimit';
 import { getPublicBaseUrl } from '../config/runtime';
 import { recordSyncAudit, type SyncDirection } from './syncAudit';
+import { sendAlert } from './alerts';
+import { logError, logInfo, logWarn } from './logger';
 import {
   ALLOWED_RSVP_STATUSES,
   buildCancellationState,
@@ -44,20 +46,53 @@ async function recordInvalidGrantFailure(syncId: string, context: string): Promi
           where: { id: syncId },
           data: { isActive: false },
         });
-        console.error(
-          `Disabled sync ${syncId} after ${sync.invalidGrantFailures} invalid_grant failures (${context})`
-        );
+        logError('webhook_invalid_grant_threshold_reached', {
+          syncId,
+          invalidGrantFailures: sync.invalidGrantFailures,
+          context,
+        });
+        await sendAlert({
+          severity: 'error',
+          key: `webhook_invalid_grant_disabled:${syncId}`,
+          message: `Sync ${syncId} was disabled after repeated invalid_grant failures in webhook processing.`,
+          details: {
+            syncId,
+            invalidGrantFailures: sync.invalidGrantFailures,
+            context,
+          },
+          cooldownMs: 6 * 60 * 60 * 1000,
+        });
       }
       return true;
     }
 
-    console.warn(
-      `invalid_grant for sync ${syncId} (${sync.invalidGrantFailures}/${MAX_INVALID_GRANT_FAILURES}) (${context})`
-    );
+    logWarn('webhook_invalid_grant_recorded', {
+      syncId,
+      invalidGrantFailures: sync.invalidGrantFailures,
+      maxInvalidGrantFailures: MAX_INVALID_GRANT_FAILURES,
+      context,
+    });
+    if (sync.invalidGrantFailures === 1) {
+      await sendAlert({
+        severity: 'warn',
+        key: `webhook_invalid_grant_warning:${syncId}`,
+        message: `Sync ${syncId} hit an invalid_grant error during webhook processing.`,
+        details: {
+          syncId,
+          invalidGrantFailures: sync.invalidGrantFailures,
+          context,
+        },
+        cooldownMs: 6 * 60 * 60 * 1000,
+      });
+    }
     return false;
   } catch (error: any) {
     if (error?.code !== 'P2025') {
-      console.error(`Failed to record invalid_grant failure for sync ${syncId}:`, error);
+      logError('webhook_invalid_grant_record_failed', {
+        syncId,
+        context,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
     return true;
   }
@@ -81,7 +116,10 @@ async function updateSyncIfExists(
   });
 
   if (result.count === 0) {
-    console.warn(`Sync ${syncId} missing while ${context}; stopping webhook processing`);
+    logWarn('webhook_sync_missing', {
+      syncId,
+      context,
+    });
     return false;
   }
 
@@ -184,10 +222,20 @@ export async function setupWebhook(
       data: updateData,
     });
 
-    console.log(`Webhook setup for ${type} calendar ${calendarId}`);
+    logInfo('webhook_setup_completed', {
+      syncId,
+      type,
+      calendarId,
+      channelId,
+    });
     return channelId;
   } catch (error) {
-    console.error(`Error setting up webhook for ${type}:`, error);
+    logError('webhook_setup_failed', {
+      syncId,
+      type,
+      calendarId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw error;
   }
 }
@@ -206,9 +254,16 @@ export async function stopWebhook(
         resourceId,
       },
     });
-    console.log(`Stopped webhook ${channelId}`);
+    logInfo('webhook_stopped', {
+      channelId,
+      resourceId,
+    });
   } catch (error) {
-    console.error('Error stopping webhook:', error);
+    logError('webhook_stop_failed', {
+      channelId,
+      resourceId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw error;
   }
 }
@@ -225,7 +280,10 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
   });
 
   if (!sync || !sync.isActive) {
-    console.log('Sync not found, inactive, or channel/resource mismatch');
+    logInfo('webhook_notification_ignored', {
+      channelId,
+      resourceId,
+    });
     return;
   }
 
@@ -240,7 +298,14 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
   const listAccountField = isSourceCalendar ? 'sourceGoogleAccountId' : 'targetGoogleAccountId';
   const direction: SyncDirection = isSourceCalendar ? 'source_to_target' : 'target_to_source';
 
-  console.log(`Processing webhook for sync ${sync.id}, source: ${sourceCalendarId}`);
+  logInfo('webhook_processing_started', {
+    syncId: sync.id,
+    channelId,
+    resourceId,
+    sourceCalendarId,
+    targetCalendarId,
+    direction,
+  });
 
   let calendar = await getAuthenticatedCalendar(sync.userId, listAccountId);
 
@@ -326,9 +391,11 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           return;
         }
 
-        console.warn(
-          `Account token expired for sync ${sync.id} (${listAccountId}); trying fallback account for ${sourceCalendarId}`
-        );
+        logWarn('webhook_list_account_invalid_grant_fallback', {
+          syncId: sync.id,
+          accountId: listAccountId || null,
+          calendarId: sourceCalendarId,
+        });
 
         const fallback = await findWorkingAccountForCalendar(
           sync.userId,
@@ -482,7 +549,12 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
         }
         hadProcessingError = true;
         lastProcessingError = eventError instanceof Error ? eventError.message : String(eventError);
-        console.error(`Error handling event ${event.id} for sync ${sync.id}:`, eventError);
+        logError('webhook_event_processing_failed', {
+          syncId: sync.id,
+          eventId: event.id,
+          direction,
+          error: eventError instanceof Error ? eventError.message : String(eventError),
+        });
       }
     }
 
@@ -502,10 +574,30 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
     const updated = await updateSyncIfExists(sync.id, updatePayload, 'finalizing updatedMin/status');
     if (!updated) return;
 
-    console.log(`Webhook processing completed for sync ${sync.id}`);
+    logInfo('webhook_processing_completed', {
+      syncId: sync.id,
+      direction,
+      hadProcessingError,
+      lastProcessingError: hadProcessingError ? lastProcessingError.slice(0, 300) : null,
+    });
+    if (hadProcessingError) {
+      await sendAlert({
+        severity: 'error',
+        key: `webhook_processing_failed:${sync.id}`,
+        message: `Webhook processing completed with errors for sync ${sync.id}.`,
+        details: {
+          syncId: sync.id,
+          direction,
+          error: lastProcessingError.slice(0, 500),
+        },
+        cooldownMs: 30 * 60 * 1000,
+      });
+    }
   } catch (error: any) {
     if (isSyncMissingError(error)) {
-      console.warn(`Sync ${sync.id} removed during webhook execution; exiting`);
+      logWarn('webhook_sync_removed_during_processing', {
+        syncId: sync.id,
+      });
       return;
     }
     await updateSyncIfExists(
@@ -516,6 +608,22 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       },
       'recording webhook failure'
     );
-    console.error('Error processing webhook notification:', error);
+    const message = error instanceof Error ? error.message : String(error);
+    logError('webhook_processing_failed', {
+      syncId: sync.id,
+      direction,
+      error: message,
+    });
+    await sendAlert({
+      severity: 'error',
+      key: `webhook_processing_crashed:${sync.id}`,
+      message: `Webhook processing crashed for sync ${sync.id}.`,
+      details: {
+        syncId: sync.id,
+        direction,
+        error: message,
+      },
+      cooldownMs: 30 * 60 * 1000,
+    });
   }
 }
