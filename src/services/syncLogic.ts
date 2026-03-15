@@ -14,6 +14,17 @@ export interface ReadableSourceSettings {
   syncMeetingLinks: boolean;
 }
 
+export interface EventSkipReason {
+  code:
+    | 'excluded_color'
+    | 'excluded_keyword'
+    | 'loop_prevention'
+    | 'free_event'
+    | 'rsvp'
+    | 'no_readable_details';
+  message: string;
+}
+
 export interface CancellationState {
   cancelledEventIds: Set<string>;
   bulkCancelledSeriesIds: Set<string>;
@@ -95,6 +106,74 @@ export function eventHasAnyCopyableDetails(event: any): boolean {
   return false;
 }
 
+export function getReadableDetailsSkipReason(
+  event: any,
+  settings: ReadableSourceSettings
+): EventSkipReason | null {
+  if (!needsReadableSourceDetails(settings)) {
+    return null;
+  }
+
+  if (eventHasAnyCopyableDetails(event)) {
+    return null;
+  }
+
+  return {
+    code: 'no_readable_details',
+    message: 'Source event has no readable title, description, location, or meeting link.',
+  };
+}
+
+export function getFilterSkipReason(
+  event: any,
+  excludedColors: string[],
+  excludedKeywords: string[],
+  syncFreeEvents: boolean,
+  copyRsvpStatuses: string[]
+): EventSkipReason | null {
+  if (event.colorId && excludedColors.includes(event.colorId)) {
+    return {
+      code: 'excluded_color',
+      message: `Event color ${event.colorId} is excluded by sync settings.`,
+    };
+  }
+
+  const text = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
+  for (const keyword of excludedKeywords) {
+    if (text.includes(keyword.toLowerCase())) {
+      return {
+        code: 'excluded_keyword',
+        message: `Event matches excluded keyword "${keyword}".`,
+      };
+    }
+  }
+
+  if (event.extendedProperties?.private?.syncId) {
+    return {
+      code: 'loop_prevention',
+      message: 'Event was created by this sync and is ignored to prevent loops.',
+    };
+  }
+
+  if (!syncFreeEvents && event.transparency === 'transparent') {
+    return {
+      code: 'free_event',
+      message: 'Free or transparent events are excluded by sync settings.',
+    };
+  }
+
+  const allowedStatuses = normalizeRsvpStatuses(copyRsvpStatuses);
+  const responseStatus = getEventSelfResponseStatus(event);
+  if (!allowedStatuses.includes(responseStatus)) {
+    return {
+      code: 'rsvp',
+      message: `Event RSVP status "${responseStatus}" is excluded by sync settings.`,
+    };
+  }
+
+  return null;
+}
+
 export function shouldSkipEvent(
   event: any,
   excludedColors: string[],
@@ -102,32 +181,15 @@ export function shouldSkipEvent(
   syncFreeEvents: boolean,
   copyRsvpStatuses: string[]
 ): boolean {
-  if (event.colorId && excludedColors.includes(event.colorId)) {
-    return true;
-  }
-
-  const text = `${event.summary || ''} ${event.description || ''}`.toLowerCase();
-  for (const keyword of excludedKeywords) {
-    if (text.includes(keyword.toLowerCase())) {
-      return true;
-    }
-  }
-
-  if (event.extendedProperties?.private?.syncId) {
-    return true;
-  }
-
-  if (!syncFreeEvents && event.transparency === 'transparent') {
-    return true;
-  }
-
-  const allowedStatuses = normalizeRsvpStatuses(copyRsvpStatuses);
-  const responseStatus = getEventSelfResponseStatus(event);
-  if (!allowedStatuses.includes(responseStatus)) {
-    return true;
-  }
-
-  return false;
+  return Boolean(
+    getFilterSkipReason(
+      event,
+      excludedColors,
+      excludedKeywords,
+      syncFreeEvents,
+      copyRsvpStatuses
+    )
+  );
 }
 
 export function getRecurringSeriesId(event: any): string | undefined {

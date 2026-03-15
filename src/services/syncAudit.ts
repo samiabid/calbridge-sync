@@ -177,6 +177,30 @@ export async function resolveSyncFailureById(failureId: string, userId: string, 
   });
 }
 
+export async function resolveOpenFailuresForSourceEvent(
+  syncId: string,
+  userId: string,
+  direction: SyncDirection,
+  sourceEventId: string,
+  resolutionNote?: string | null
+) {
+  return prisma.syncFailure.updateMany({
+    where: {
+      syncId,
+      userId,
+      direction,
+      sourceEventId,
+      status: 'open',
+    },
+    data: {
+      status: 'resolved',
+      resolvedAt: new Date(),
+      resolutionNote:
+        normalizeOptional(resolutionNote) || 'Resolved automatically after manual force sync',
+    },
+  });
+}
+
 export async function incrementFailureRetryCount(failureId: string, userId: string) {
   return prisma.syncFailure.updateMany({
     where: {

@@ -264,6 +264,81 @@
       gap: 14px;
     }
 
+    .events-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      align-items: end;
+      margin-top: 20px;
+    }
+
+    .events-summary {
+      margin-top: 16px;
+      color: #718096;
+      font-size: 0.95em;
+    }
+
+    .events-table-wrapper {
+      margin-top: 18px;
+      overflow-x: auto;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      background: #fff;
+    }
+
+    .events-table {
+      width: 100%;
+      min-width: 980px;
+      border-collapse: collapse;
+    }
+
+    .events-table th,
+    .events-table td {
+      padding: 12px 14px;
+      border-bottom: 1px solid #edf2f7;
+      text-align: left;
+      vertical-align: top;
+      font-size: 0.92rem;
+    }
+
+    .events-table th {
+      background: #f8fafc;
+      color: #4a5568;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .events-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .event-row-meta {
+      color: #718096;
+      font-size: 0.82rem;
+      line-height: 1.45;
+      margin-top: 4px;
+    }
+
+    .events-pagination {
+      margin-top: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .badge-neutral {
+      background: #e2e8f0;
+      color: #334155;
+    }
+
+    .btn-small {
+      padding: 8px 12px;
+      font-size: 0.9em;
+    }
+
     .repair-item {
       border: 1px solid #e2e8f0;
       border-radius: 10px;
@@ -674,6 +749,57 @@
     </div>
 
     <div class="section">
+      <h2>Events</h2>
+      <p style="color: #718096;">
+        Live source events for a bounded window, with current sync status and a per-event force-sync action.
+      </p>
+      <% if (!syncs || syncs.length === 0) { %>
+        <p style="color: #718096; margin-top: 16px;">Create a sync before using the event-level dashboard.</p>
+      <% } else { %>
+        <div class="events-controls">
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="eventSyncSelector">Sync</label>
+            <select id="eventSyncSelector">
+              <% syncs.forEach((sync) => { %>
+                <option value="<%= sync.id %>">
+                  <%= sync.sourceCalendarName %> → <%= sync.targetCalendarName %><%= sync.isTwoWay ? ' (Two-way)' : '' %>
+                </option>
+              <% }) %>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="eventDirectionSelector">Direction</label>
+            <select id="eventDirectionSelector"></select>
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="eventDaysBack">Days Back</label>
+            <input type="number" id="eventDaysBack" min="0" max="730" value="30">
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="eventDaysForward">Days Forward</label>
+            <input type="number" id="eventDaysForward" min="0" max="730" value="365">
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <label for="eventPageSize">Page Size</label>
+            <select id="eventPageSize">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom: 0;">
+            <button class="btn" type="button" onclick="loadSyncEvents({ resetPage: true })">Load Events</button>
+          </div>
+        </div>
+        <div id="eventsSummary" class="events-summary">Loading events...</div>
+        <div id="eventsTableContainer" class="events-table-wrapper">
+          <div class="table-empty">Loading events...</div>
+        </div>
+        <div id="eventsPagination" class="events-pagination"></div>
+      <% } %>
+    </div>
+
+    <div class="section">
       <h2>Failed Events</h2>
       <% if (!failedEvents || failedEvents.length === 0) { %>
         <p style="color: #718096;">No open failed events.</p>
@@ -834,6 +960,14 @@
     const syncsData = <%- JSON.stringify(syncs) %>;
     const initialSystemHealth = <%- JSON.stringify(systemHealthSummary) %>;
     const defaultRsvpStatuses = ['accepted', 'tentative', 'needsAction', 'declined'];
+    let eventsDashboardState = {
+      syncId: syncsData[0]?.id || '',
+      direction: syncsData[0]?.isTwoWay ? 'all' : 'source_to_target',
+      daysBack: 30,
+      daysForward: 365,
+      page: 1,
+      pageSize: 25,
+    };
 
     // Google Calendar colors
     const calendarColors = [
@@ -1456,6 +1590,360 @@
       postFailureAction(failureId, 'resolve', 'Failed event marked resolved.');
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function getSelectedEventSync() {
+      return syncsData.find((sync) => sync.id === eventsDashboardState.syncId) || null;
+    }
+
+    function renderEventDirectionOptions() {
+      const select = document.getElementById('eventDirectionSelector');
+      if (!select) return;
+
+      const sync = getSelectedEventSync();
+      if (!sync) {
+        select.innerHTML = '<option value="source_to_target">Source → Target</option>';
+        select.value = 'source_to_target';
+        return;
+      }
+
+      const options = sync.isTwoWay
+        ? [
+            ['all', 'All directions'],
+            ['source_to_target', 'Source → Target'],
+            ['target_to_source', 'Target → Source'],
+          ]
+        : [['source_to_target', 'Source → Target']];
+
+      select.innerHTML = options
+        .map(([value, label]) => `<option value="${value}">${label}</option>`)
+        .join('');
+
+      const allowedValues = new Set(options.map(([value]) => value));
+      const nextDirection = allowedValues.has(eventsDashboardState.direction)
+        ? eventsDashboardState.direction
+        : options[0][0];
+      select.value = nextDirection;
+      eventsDashboardState.direction = nextDirection;
+    }
+
+    function getEventStatusBadgeClass(status) {
+      switch (status) {
+        case 'failed':
+          return 'badge-danger';
+        case 'synced':
+          return 'badge-success';
+        case 'skipped':
+          return 'badge-warning';
+        default:
+          return 'badge-neutral';
+      }
+    }
+
+    function getEventStatusLabel(status) {
+      const labels = {
+        failed: 'Failed',
+        synced: 'Synced',
+        skipped: 'Skipped',
+        not_synced: 'Not Synced',
+      };
+      return labels[status] || status;
+    }
+
+    function getDirectionLabel(direction) {
+      return direction === 'target_to_source' ? 'Target → Source' : 'Source → Target';
+    }
+
+    function formatAllDayDate(rawDate, endDate) {
+      const start = new Date(rawDate);
+      if (Number.isNaN(start.getTime())) return 'All day';
+      if (!endDate) return `${start.toLocaleDateString()} · All day`;
+
+      const exclusiveEnd = new Date(endDate);
+      if (Number.isNaN(exclusiveEnd.getTime())) {
+        return `${start.toLocaleDateString()} · All day`;
+      }
+
+      exclusiveEnd.setDate(exclusiveEnd.getDate() - 1);
+      if (start.toDateString() === exclusiveEnd.toDateString()) {
+        return `${start.toLocaleDateString()} · All day`;
+      }
+
+      return `${start.toLocaleDateString()} - ${exclusiveEnd.toLocaleDateString()} · All day`;
+    }
+
+    function formatEventTimeRange(item) {
+      const startRaw = item?.start?.dateTime || item?.start?.date || null;
+      const endRaw = item?.end?.dateTime || item?.end?.date || null;
+      if (!startRaw) return 'Unknown time';
+
+      if (item.isAllDay) {
+        return formatAllDayDate(startRaw, endRaw);
+      }
+
+      const start = new Date(startRaw);
+      const end = endRaw ? new Date(endRaw) : null;
+      if (Number.isNaN(start.getTime())) return 'Unknown time';
+      if (!end || Number.isNaN(end.getTime())) {
+        return start.toLocaleString();
+      }
+
+      return `${start.toLocaleString()} - ${end.toLocaleString()}`;
+    }
+
+    function renderEventsTable(data) {
+      const container = document.getElementById('eventsTableContainer');
+      const pagination = document.getElementById('eventsPagination');
+      const items = Array.isArray(data?.items) ? data.items : [];
+
+      if (!container || !pagination) return;
+
+      if (items.length === 0) {
+        container.innerHTML = '<div class="table-empty">No events found in the selected window.</div>';
+        pagination.innerHTML = '';
+        return;
+      }
+
+      container.innerHTML = `
+        <table class="events-table">
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Time</th>
+              <th>Location</th>
+              <th>Direction</th>
+              <th>Status</th>
+              <th>Details</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${items.map((item) => `
+              <tr>
+                <td>
+                  <strong>${escapeHtml(item.summary)}</strong>
+                  <div class="event-row-meta">Source Event: ${escapeHtml(item.sourceEventId)}</div>
+                  ${item.sourceStatus ? `<div class="event-row-meta">Source Status: ${escapeHtml(item.sourceStatus)}</div>` : ''}
+                </td>
+                <td>${escapeHtml(formatEventTimeRange(item))}</td>
+                <td>${item.location ? escapeHtml(item.location) : '<span style="color: #94a3b8;">-</span>'}</td>
+                <td><span class="badge badge-neutral">${escapeHtml(getDirectionLabel(item.direction))}</span></td>
+                <td><span class="badge ${getEventStatusBadgeClass(item.status)}">${escapeHtml(getEventStatusLabel(item.status))}</span></td>
+                <td>
+                  ${escapeHtml(item.statusReason)}
+                  ${item.targetEventId ? `<div class="event-row-meta">Target Event: ${escapeHtml(item.targetEventId)}</div>` : ''}
+                  ${item.lastSyncedAt ? `<div class="event-row-meta">Last Synced: ${escapeHtml(new Date(item.lastSyncedAt).toLocaleString())}</div>` : ''}
+                </td>
+                <td>
+                  <button
+                    class="btn btn-secondary btn-small force-sync-event-button"
+                    data-direction="${escapeHtml(item.direction)}"
+                    data-source-event-id="${escapeHtml(item.sourceEventId)}"
+                    data-source-calendar-id="${escapeHtml(item.sourceCalendarId)}"
+                  >
+                    Force Sync
+                  </button>
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+
+      const page = data?.page || 1;
+      const totalPages = data?.totalPages || 1;
+      pagination.innerHTML = `
+        <div style="color: #718096;">
+          Page ${page} of ${totalPages}
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary btn-small" type="button" onclick="loadSyncEvents({ page: ${page - 1} })" ${page <= 1 ? 'disabled' : ''}>
+            Previous
+          </button>
+          <button class="btn btn-secondary btn-small" type="button" onclick="loadSyncEvents({ page: ${page + 1} })" ${page >= totalPages ? 'disabled' : ''}>
+            Next
+          </button>
+        </div>
+      `;
+
+      container.querySelectorAll('.force-sync-event-button').forEach((button) => {
+        button.addEventListener('click', () => forceSyncListedEvent(button));
+      });
+    }
+
+    function updateEventsSummary(data) {
+      const summary = document.getElementById('eventsSummary');
+      if (!summary) return;
+
+      const total = data?.total || 0;
+      if (total === 0) {
+        summary.textContent = 'No live source events found in the selected window.';
+        return;
+      }
+
+      const startIndex = ((data.page || 1) - 1) * (data.pageSize || 25) + 1;
+      const endIndex = Math.min(total, startIndex + (data.items?.length || 0) - 1);
+      summary.textContent =
+        `Showing ${startIndex}-${endIndex} of ${total} events for ${data.syncLabel} ` +
+        `(${data.window.daysBack}d back / ${data.window.daysForward}d forward).`;
+    }
+
+    function syncEventsStateFromControls(resetPage = false) {
+      const syncSelector = document.getElementById('eventSyncSelector');
+      const directionSelector = document.getElementById('eventDirectionSelector');
+      const daysBackInput = document.getElementById('eventDaysBack');
+      const daysForwardInput = document.getElementById('eventDaysForward');
+      const pageSizeSelect = document.getElementById('eventPageSize');
+
+      if (!syncSelector || !directionSelector || !daysBackInput || !daysForwardInput || !pageSizeSelect) {
+        return;
+      }
+
+      eventsDashboardState.syncId = syncSelector.value;
+      eventsDashboardState.direction = directionSelector.value;
+      eventsDashboardState.daysBack = Number(daysBackInput.value || 30);
+      eventsDashboardState.daysForward = Number(daysForwardInput.value || 365);
+      eventsDashboardState.pageSize = Number(pageSizeSelect.value || 25);
+
+      if (resetPage) {
+        eventsDashboardState.page = 1;
+      }
+    }
+
+    async function loadSyncEvents(options = {}) {
+      const container = document.getElementById('eventsTableContainer');
+      const summary = document.getElementById('eventsSummary');
+      if (!container || !summary) return;
+
+      syncEventsStateFromControls(Boolean(options.resetPage));
+      if (typeof options.page === 'number') {
+        eventsDashboardState.page = Math.max(1, options.page);
+      }
+
+      if (!eventsDashboardState.syncId) {
+        summary.textContent = 'Select a sync to load events.';
+        container.innerHTML = '<div class="table-empty">Select a sync to load events.</div>';
+        return;
+      }
+
+      summary.textContent = 'Loading events...';
+      container.innerHTML = '<div class="table-empty">Loading events...</div>';
+      const pagination = document.getElementById('eventsPagination');
+      if (pagination) pagination.innerHTML = '';
+
+      try {
+        const params = new URLSearchParams({
+          daysBack: String(eventsDashboardState.daysBack),
+          daysForward: String(eventsDashboardState.daysForward),
+          direction: eventsDashboardState.direction,
+          page: String(eventsDashboardState.page),
+          pageSize: String(eventsDashboardState.pageSize),
+        });
+        const response = await fetch(`/sync/${eventsDashboardState.syncId}/events?${params.toString()}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+          summary.textContent = data?.error || 'Failed to load sync events.';
+          container.innerHTML = `<div class="table-empty">${escapeHtml(data?.error || 'Failed to load sync events.')}</div>`;
+          return;
+        }
+
+        eventsDashboardState.page = data.page;
+        eventsDashboardState.pageSize = data.pageSize;
+        eventsDashboardState.direction = data.direction;
+        updateEventsSummary(data);
+        renderEventsTable(data);
+      } catch (error) {
+        console.error('Error loading sync events:', error);
+        summary.textContent = 'Failed to load sync events.';
+        container.innerHTML = '<div class="table-empty">Failed to load sync events.</div>';
+      }
+    }
+
+    async function forceSyncListedEvent(button) {
+      if (!button) return;
+
+      const sourceEventId = button.dataset.sourceEventId;
+      const sourceCalendarId = button.dataset.sourceCalendarId;
+      const direction = button.dataset.direction;
+      if (!sourceEventId || !sourceCalendarId || !direction) return;
+
+      button.disabled = true;
+      const originalLabel = button.textContent;
+      button.textContent = 'Syncing...';
+
+      try {
+        const response = await fetch(`/sync/${eventsDashboardState.syncId}/events/force-sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            direction,
+            sourceEventId,
+            sourceCalendarId,
+          }),
+        });
+
+        const body = await response.json();
+        if (!response.ok) {
+          alert(body?.error || 'Failed to force sync event');
+          return;
+        }
+
+        await loadSyncEvents({ page: eventsDashboardState.page });
+      } catch (error) {
+        console.error('Error forcing sync event:', error);
+        alert('Failed to force sync event');
+      } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+      }
+    }
+
+    function initializeEventsDashboard() {
+      const syncSelector = document.getElementById('eventSyncSelector');
+      if (!syncSelector) return;
+
+      if (!eventsDashboardState.syncId && syncSelector.options.length > 0) {
+        eventsDashboardState.syncId = syncSelector.value;
+      }
+
+      syncSelector.value = eventsDashboardState.syncId;
+      renderEventDirectionOptions();
+
+      syncSelector.addEventListener('change', () => {
+        eventsDashboardState.syncId = syncSelector.value;
+        renderEventDirectionOptions();
+        loadSyncEvents({ resetPage: true });
+      });
+
+      const directionSelector = document.getElementById('eventDirectionSelector');
+      if (directionSelector) {
+        directionSelector.addEventListener('change', () => loadSyncEvents({ resetPage: true }));
+      }
+
+      const pageSizeSelect = document.getElementById('eventPageSize');
+      if (pageSizeSelect) {
+        pageSizeSelect.value = String(eventsDashboardState.pageSize);
+        pageSizeSelect.addEventListener('change', () => loadSyncEvents({ resetPage: true }));
+      }
+
+      ['eventDaysBack', 'eventDaysForward'].forEach((id) => {
+        const input = document.getElementById(id);
+        if (input) {
+          input.addEventListener('change', () => loadSyncEvents({ resetPage: true }));
+        }
+      });
+
+      loadSyncEvents({ resetPage: true });
+    }
+
     async function loadAccounts() {
       try {
         const response = await fetch('/sync/accounts');
@@ -1520,6 +2008,7 @@
       loadSystemHealth();
       loadAccounts();
       loadCalendars();
+      initializeEventsDashboard();
     });
   </script>
 </body>

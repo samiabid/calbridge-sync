@@ -20,9 +20,12 @@ import {
   runSyncReconciliation,
   scanSyncOrphanClones,
 } from '../services/syncRepair';
+import { buildSyncEventsRouter } from './syncEvents';
 
 const router = Router();
 const prisma = new PrismaClient();
+
+router.use('/', buildSyncEventsRouter());
 
 function getAccountStatusReason(error: unknown): string {
   const err = error as any;
