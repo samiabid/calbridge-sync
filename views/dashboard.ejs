@@ -203,6 +203,61 @@
       margin-top: 14px;
     }
 
+    .health-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .health-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 16px;
+      background: #f8fafc;
+    }
+
+    .health-card h3 {
+      font-size: 0.95rem;
+      color: #4a5568;
+      margin-bottom: 8px;
+    }
+
+    .health-card .metric {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: #2d3748;
+      line-height: 1.1;
+    }
+
+    .health-card .meta {
+      margin-top: 8px;
+      color: #718096;
+      font-size: 0.85rem;
+      line-height: 1.4;
+    }
+
+    .check-list {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .check-item {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+      color: #2d3748;
+      font-size: 0.9rem;
+    }
+
+    .check-item strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
     .repair-panel {
       margin-top: 20px;
       display: grid;
@@ -475,6 +530,49 @@
 
   <div class="container">
     <div class="section">
+      <h2>System Health</h2>
+      <p style="color: #718096;">
+        Production/runtime status, open failure volume, and webhook renewal state.
+      </p>
+      <div class="health-grid">
+        <div class="health-card">
+          <h3>Environment</h3>
+          <div class="metric"><%= systemHealthSummary.environment %></div>
+          <div class="meta">Current runtime mode from server-side config.</div>
+        </div>
+        <div class="health-card">
+          <h3>Total Syncs</h3>
+          <div class="metric"><%= systemHealthSummary.totalSyncCount %></div>
+          <div class="meta"><%= systemHealthSummary.activeSyncCount %> active, <%= systemHealthSummary.pausedSyncCount %> paused.</div>
+        </div>
+        <div class="health-card">
+          <h3>Error Syncs</h3>
+          <div class="metric"><%= systemHealthSummary.errorSyncCount %></div>
+          <div class="meta">Active syncs currently reporting `error` status.</div>
+        </div>
+        <div class="health-card">
+          <h3>Open Failures</h3>
+          <div class="metric"><%= systemHealthSummary.openFailureCount %></div>
+          <div class="meta">DB-backed failed-event queue awaiting manual or automatic recovery.</div>
+        </div>
+        <div class="health-card">
+          <h3>Webhook Renewal</h3>
+          <div class="metric"><%= systemHealthSummary.webhookRenewal.status %></div>
+          <div class="meta">
+            Schedule: <%= systemHealthSummary.webhookRenewal.schedule %><br>
+            Last summary: <%= systemHealthSummary.webhookRenewal.lastRunSummary || 'No run yet' %>
+          </div>
+        </div>
+      </div>
+      <div class="check-list" id="systemChecks">
+        <div class="check-item">
+          <strong>Readiness</strong>
+          Loading live `/ready` checks...
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
       <h2>Connected Google Accounts</h2>
       <div id="accountsList" style="margin-top: 15px;">
         <p style="color: #718096;">Loading accounts...</p>
@@ -734,6 +832,7 @@
     let latestRepairCandidates = [];
     let latestRepairSyncId = null;
     const syncsData = <%- JSON.stringify(syncs) %>;
+    const initialSystemHealth = <%- JSON.stringify(systemHealthSummary) %>;
     const defaultRsvpStatuses = ['accepted', 'tentative', 'needsAction', 'declined'];
 
     // Google Calendar colors
@@ -786,6 +885,46 @@
         console.error('Error loading calendars:', error);
         alert('Failed to load calendars');
         return [];
+      }
+    }
+
+    function renderSystemChecks(data) {
+      const container = document.getElementById('systemChecks');
+      const checks = data?.checks || {};
+      const webhookRenewal = data?.webhookRenewal || initialSystemHealth.webhookRenewal || {};
+      const entries = [
+        ['Database', checks.database, data?.databaseError || 'Connected'],
+        ['Session Config', checks.sessionConfigured, checks.sessionConfigured ? 'Configured' : 'Missing secret or DB URL'],
+        ['Token Encryption', checks.tokenEncryptionConfigured, checks.tokenEncryptionConfigured ? 'Configured' : 'TOKEN_ENCRYPTION_KEY missing'],
+        ['Public URL', checks.publicUrlConfigured, checks.publicUrlConfigured ? 'Configured' : 'PUBLIC_URL missing'],
+        ['Internal Renewal Token', checks.internalRenewalTokenConfigured, checks.internalRenewalTokenConfigured ? 'Configured' : 'INTERNAL_CRON_TOKEN missing'],
+        ['Webhook Renewal', checks.webhookRenewalScheduled, webhookRenewal.lastRunSummary || webhookRenewal.status || 'Not scheduled'],
+      ];
+
+      container.innerHTML = entries.map(([label, ok, detail]) => `
+        <div class="check-item">
+          <strong>${label}</strong>
+          <span class="badge ${ok ? 'badge-success' : 'badge-danger'}">${ok ? 'OK' : 'Issue'}</span>
+          <div style="margin-top: 6px; color: #718096;">${detail || 'No detail available'}</div>
+        </div>
+      `).join('');
+    }
+
+    async function loadSystemHealth() {
+      try {
+        const response = await fetch('/ready');
+        const data = await response.json();
+        renderSystemChecks(data);
+      } catch (error) {
+        console.error('Error loading system health:', error);
+        const container = document.getElementById('systemChecks');
+        container.innerHTML = `
+          <div class="check-item">
+            <strong>Readiness</strong>
+            <span class="badge badge-danger">Issue</span>
+            <div style="margin-top: 6px; color: #718096;">Failed to load live readiness checks.</div>
+          </div>
+        `;
       }
     }
 
@@ -1377,6 +1516,7 @@
 
     // Load accounts and calendars on page load
     document.addEventListener('DOMContentLoaded', () => {
+      loadSystemHealth();
       loadAccounts();
       loadCalendars();
     });

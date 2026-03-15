@@ -1,6 +1,6 @@
 # Calendar Sync App
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/calendar-sync?referralCode=q_ltY0&utm_medium=integration&utm_source=template&utm_campaign=generic)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/6GeBmy?referralCode=q_ltY0&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
 A two-way Google Calendar synchronization application that allows you to sync events between multiple Google calendars in real-time, with advanced filtering options.
 
@@ -14,9 +14,9 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ![Home mobile](docs/screenshots/home-mobile.png)
 
-### Dashboard (Desktop)
+### Dashboard (Unauthenticated Redirect View)
 
-![Dashboard unauthenticated](https://media.cleanshot.cloud/media/99492/g0nGVAMLyVo1F0wjNDnEXfU1vKVx9dIHm91KI19n.jpeg?Expires=1771360757&Signature=O-KEPMIsEsHou7zcZkmJ4AB4a7QztRxnCSPKb9uRzkbj6fxNLnnA9FZeFx9rdNoql~L9BzVIgmkYLyr97Cu2uVgfyvOGQLTqQGt0FL43p-B3aM0KVj6hSr13gWlDJrJkParQWdK-el8B~HLGZVAQf1S5QGjqaKoKjIbf~V9-osRIXyXOul0Fx4c2IIFNL3jsBv6JTIDzXEf-xip3xhM5FkpKN2lGkbkb84nALhWEhuFl3FNQ38eOFuIMw3eSrTTtipBK5dTFOZ7VVGOpBBwTJGRcABAW-YCAPeRgb9ZJXke0z7A8M7mVcyQtUO9w7UyQN~4RqIpadeI9pgL-dre5ww__&Key-Pair-Id=K269JMAT9ZF4GZ)
+![Dashboard unauthenticated](docs/screenshots/dashboard-unauth.png)
 
 ## Features
 
@@ -130,6 +130,8 @@ In Railway project settings, add these environment variables:
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
 GOOGLE_REDIRECT_URI=https://your-app.railway.app/auth/google/callback
+NODE_ENV=production
+INTERNAL_CRON_TOKEN=<long-random-string>
 ```
 
 `GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` (or Railway public domain vars) is set, but Google Cloud must still allow:
@@ -144,6 +146,43 @@ GOOGLE_REDIRECT_URI=https://your-app.railway.app/auth/google/callback
 ### Step 6: Deploy
 
 Railway will automatically build and deploy your app. Once deployed, click the generated URL to access your app!
+
+## Operations
+
+### Health Endpoints
+
+- `GET /health` returns a lightweight runtime status payload
+- `GET /ready` verifies DB connectivity plus critical production config like `PUBLIC_URL`, token encryption, and the protected renewal token
+
+### External Webhook Renewal Trigger
+
+The app now supports a protected renewal endpoint so webhook renewal does not need to depend only on in-process cron:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $INTERNAL_CRON_TOKEN" \
+  https://your-app.railway.app/webhook/internal/renew
+```
+
+Recommended usage:
+- keep the built-in cron enabled as a fallback
+- schedule the protected endpoint from an external scheduler once per day
+- monitor `/ready` to confirm `internalRenewalTokenConfigured` and `webhookRenewalScheduled`
+
+### Alert Delivery
+
+Alerts are throttled and always logged as structured events. To send them to an external system, set:
+
+```bash
+ALERT_WEBHOOK_URL=https://your-alert-endpoint.example.com
+```
+
+Current alert categories include:
+- repeated `invalid_grant` failures
+- sync disablement after repeated auth failures
+- webhook processing failures
+- webhook renewal failures
+- initial backfill failure
 
 ## Usage
 
@@ -231,6 +270,7 @@ Railway will automatically build and deploy your app. Once deployed, click the g
 
 ### Webhooks
 - `POST /webhook/google` - Google Calendar webhook notifications
+- `POST /webhook/internal/renew` - Protected manual/external webhook renewal trigger
 
 ## Troubleshooting
 
