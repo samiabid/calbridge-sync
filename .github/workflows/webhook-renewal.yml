@@ -1,0 +1,32 @@
+name: Webhook Renewal
+
+on:
+  schedule:
+    - cron: '10 23 * * *'
+  workflow_dispatch:
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger protected renewal endpoint
+        env:
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          INTERNAL_CRON_TOKEN: ${{ secrets.INTERNAL_CRON_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${APP_BASE_URL:-}" ]; then
+            echo "APP_BASE_URL secret is required"
+            exit 1
+          fi
+
+          if [ -z "${INTERNAL_CRON_TOKEN:-}" ]; then
+            echo "INTERNAL_CRON_TOKEN secret is required"
+            exit 1
+          fi
+
+          curl --fail --show-error --silent \
+            -X POST \
+            -H "Authorization: Bearer ${INTERNAL_CRON_TOKEN}" \
+            "${APP_BASE_URL%/}/webhook/internal/renew"

@@ -169,6 +169,17 @@ Recommended usage:
 - schedule the protected endpoint from an external scheduler once per day
 - monitor `/ready` to confirm `internalRenewalTokenConfigured` and `webhookRenewalScheduled`
 
+### GitHub Actions Scheduler
+
+The repo now includes `.github/workflows/webhook-renewal.yml`, which can trigger the protected renewal endpoint on a daily schedule and via manual dispatch.
+
+Configure these GitHub Actions secrets:
+
+```bash
+APP_BASE_URL=https://your-app.railway.app
+INTERNAL_CRON_TOKEN=<same token configured in Railway>
+```
+
 ### Alert Delivery
 
 Alerts are throttled and always logged as structured events. To send them to an external system, set:
@@ -183,6 +194,14 @@ Current alert categories include:
 - webhook processing failures
 - webhook renewal failures
 - initial backfill failure
+
+You can verify alert delivery with the protected internal test endpoint:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $INTERNAL_CRON_TOKEN" \
+  https://your-app.railway.app/webhook/internal/test-alert
+```
 
 ## Usage
 

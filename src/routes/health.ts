@@ -5,7 +5,6 @@ import { getPublicBaseUrl } from '../config/runtime';
 import { isTokenEncryptionEnabled } from '../services/tokenCrypto';
 import { getWebhookRenewalStatus } from '../services/webhookRenewal';
 
-const router = Router();
 const prisma = new PrismaClient();
 
 function getAppMetadata() {
@@ -21,50 +20,74 @@ function getAppMetadata() {
   };
 }
 
-router.get('/health', (_req, res) => {
-  res.json({
-    ok: true,
-    ...getAppMetadata(),
-    timestamp: new Date().toISOString(),
-    webhookRenewal: getWebhookRenewalStatus(),
+interface HealthRouteDeps {
+  queryDatabase?: () => Promise<void>;
+  getPublicUrl?: () => string | null | undefined;
+  isTokenEncryptionReady?: () => boolean;
+  getRenewalStatus?: typeof getWebhookRenewalStatus;
+  getMetadata?: () => ReturnType<typeof getAppMetadata>;
+}
+
+export function buildHealthRouter(deps: HealthRouteDeps = {}) {
+  const router = Router();
+  const queryDatabase =
+    deps.queryDatabase ||
+    (async () => {
+      await prisma.$queryRawUnsafe('SELECT 1');
+    });
+  const getPublicUrl = deps.getPublicUrl || getPublicBaseUrl;
+  const isTokenEncryptionReady = deps.isTokenEncryptionReady || isTokenEncryptionEnabled;
+  const getRenewalStatus = deps.getRenewalStatus || getWebhookRenewalStatus;
+  const getMetadata = deps.getMetadata || getAppMetadata;
+
+  router.get('/health', (_req, res) => {
+    res.json({
+      ok: true,
+      ...getMetadata(),
+      timestamp: new Date().toISOString(),
+      webhookRenewal: getRenewalStatus(),
+    });
   });
-});
 
-router.get('/ready', async (_req, res) => {
-  const timestamp = new Date().toISOString();
-  const checks = {
-    database: false,
-    sessionConfigured: Boolean(process.env.DATABASE_URL) && Boolean(process.env.SESSION_SECRET || process.env.NODE_ENV !== 'production'),
-    tokenEncryptionConfigured: isTokenEncryptionEnabled(),
-    publicUrlConfigured: Boolean(getPublicBaseUrl()),
-    internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
-    webhookRenewalScheduled: getWebhookRenewalStatus().status !== 'not_scheduled',
-  };
+  router.get('/ready', async (_req, res) => {
+    const timestamp = new Date().toISOString();
+    const checks = {
+      database: false,
+      sessionConfigured: Boolean(process.env.DATABASE_URL) && Boolean(process.env.SESSION_SECRET || process.env.NODE_ENV !== 'production'),
+      tokenEncryptionConfigured: isTokenEncryptionReady(),
+      publicUrlConfigured: Boolean(getPublicUrl()),
+      internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
+      alertWebhookConfigured: Boolean(process.env.ALERT_WEBHOOK_URL),
+      webhookRenewalScheduled: getRenewalStatus().status !== 'not_scheduled',
+    };
 
-  let databaseError: string | null = null;
+    let databaseError: string | null = null;
 
-  try {
-    await prisma.$queryRawUnsafe('SELECT 1');
-    checks.database = true;
-  } catch (error: any) {
-    databaseError = error instanceof Error ? error.message : String(error);
-  }
+    try {
+      await queryDatabase();
+      checks.database = true;
+    } catch (error: any) {
+      databaseError = error instanceof Error ? error.message : String(error);
+    }
 
-  const webhookRenewal = getWebhookRenewalStatus();
-  const ok =
-    checks.database &&
-    checks.sessionConfigured &&
-    checks.webhookRenewalScheduled &&
-    webhookRenewal.status !== 'error';
+    const webhookRenewal = getRenewalStatus();
+    const ok =
+      checks.database &&
+      checks.sessionConfigured &&
+      checks.webhookRenewalScheduled &&
+      webhookRenewal.status !== 'error';
 
-  res.status(ok ? 200 : 503).json({
-    ok,
-    ...getAppMetadata(),
-    timestamp,
-    checks,
-    databaseError,
-    webhookRenewal,
+    res.status(ok ? 200 : 503).json({
+      ok,
+      ...getMetadata(),
+      timestamp,
+      checks,
+      databaseError,
+      webhookRenewal,
+    });
   });
-});
 
-export default router;
+  return router;
+}
+
+export default buildHealthRouter();

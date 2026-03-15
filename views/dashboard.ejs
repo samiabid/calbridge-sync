@@ -898,6 +898,7 @@
         ['Token Encryption', checks.tokenEncryptionConfigured, checks.tokenEncryptionConfigured ? 'Configured' : 'TOKEN_ENCRYPTION_KEY missing'],
         ['Public URL', checks.publicUrlConfigured, checks.publicUrlConfigured ? 'Configured' : 'PUBLIC_URL missing'],
         ['Internal Renewal Token', checks.internalRenewalTokenConfigured, checks.internalRenewalTokenConfigured ? 'Configured' : 'INTERNAL_CRON_TOKEN missing'],
+        ['Alert Webhook', checks.alertWebhookConfigured, checks.alertWebhookConfigured ? 'Configured' : 'ALERT_WEBHOOK_URL not set'],
         ['Webhook Renewal', checks.webhookRenewalScheduled, webhookRenewal.lastRunSummary || webhookRenewal.status || 'Not scheduled'],
       ];
 
