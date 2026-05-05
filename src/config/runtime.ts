@@ -1,3 +1,5 @@
+import { getAccessControlSummary } from './accessControl';
+
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -55,6 +57,7 @@ export function getRuntimeConfigSummary() {
       process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim()
     ),
     googleRedirectUriConfigured: Boolean(getGoogleRedirectUri()),
+    accessControl: getAccessControlSummary(),
   };
 }
 

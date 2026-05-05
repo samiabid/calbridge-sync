@@ -133,10 +133,16 @@ PUBLIC_URL=https://calendar.samiabid.com
 GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
 NODE_ENV=production
 INTERNAL_CRON_TOKEN=<long-random-string>
+ALLOWED_LOGIN_EMAILS=hello@pointillist.org
+ALLOWED_GOOGLE_ACCOUNT_EMAILS=hello@pointillist.org,sami@solvaa.co.uk
 ```
 
 `GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` is set, but Google Cloud must still allow:
 - `https://calendar.samiabid.com/auth/google/callback`
+
+`ALLOWED_LOGIN_EMAILS` controls who can sign into the app. `ALLOWED_GOOGLE_ACCOUNT_EMAILS`
+controls which Google calendar accounts an allowlisted user can connect or re-authenticate.
+Both values are required in production for `/ready` to be healthy.
 
 ### Step 5: Update Google OAuth Settings
 
@@ -157,7 +163,7 @@ Railway will automatically build and deploy your app. Once deployed, click the g
 ### Health Endpoints
 
 - `GET /health` returns a lightweight runtime status payload
-- `GET /ready` verifies DB connectivity plus critical production config like `PUBLIC_URL`, token encryption, and the protected renewal token
+- `GET /ready` verifies DB connectivity plus critical production config like `PUBLIC_URL`, token encryption, private-app allowlists, and the protected renewal token
 
 ### External Webhook Renewal Trigger
 
@@ -196,6 +202,8 @@ The canonical production URL is `https://calendar.samiabid.com`. When moving the
    ```bash
    PUBLIC_URL=https://calendar.samiabid.com
    GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
+   ALLOWED_LOGIN_EMAILS=hello@pointillist.org
+   ALLOWED_GOOGLE_ACCOUNT_EMAILS=hello@pointillist.org,sami@solvaa.co.uk
    ```
 5. Update Google Cloud OAuth settings with authorized domain `samiabid.com`, origin `https://calendar.samiabid.com`, and redirect URI `https://calendar.samiabid.com/auth/google/callback`.
 6. Update GitHub Actions secret `APP_BASE_URL=https://calendar.samiabid.com`.
@@ -376,6 +384,7 @@ npm run db:studio
 - ✅ OAuth tokens stored encrypted in database
 - ✅ No event content stored (only metadata for sync tracking)
 - ✅ Minimal Google Calendar permissions requested
+- ✅ Private app email allowlist for login and connected Google accounts
 - ✅ HTTPS enforced in production
 - ✅ Session-based authentication
 - ✅ Automatic sync disable safeguard after repeated revoked-token (`invalid_grant`) failures

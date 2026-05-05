@@ -81,3 +81,21 @@ test('production runtime config fails fast when Google credentials are missing',
   );
 });
 
+test('runtime config reports allowlist status without exposing email values', () => {
+  withEnv(
+    {
+      NODE_ENV: 'production',
+      ALLOWED_LOGIN_EMAILS: 'hello@pointillist.org',
+      ALLOWED_GOOGLE_ACCOUNT_EMAILS: 'hello@pointillist.org,sami@solvaa.co.uk',
+    },
+    () => {
+      const summary = getRuntimeConfigSummary();
+
+      assert.equal(summary.accessControl.loginAllowlistConfigured, true);
+      assert.equal(summary.accessControl.connectedAccountAllowlistConfigured, true);
+      assert.equal(summary.accessControl.accessControlConfigured, true);
+      assert.equal(JSON.stringify(summary.accessControl).includes('hello@pointillist.org'), false);
+      assert.equal(JSON.stringify(summary.accessControl).includes('sami@solvaa.co.uk'), false);
+    }
+  );
+});

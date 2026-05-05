@@ -136,6 +136,12 @@ test('ready route reports degraded status when database check fails', async () =
       canonicalPublicUrlConfigured: false,
       googleClientConfigured: true,
       googleRedirectUriConfigured: true,
+      accessControl: {
+        privateAppMode: true,
+        loginAllowlistConfigured: true,
+        connectedAccountAllowlistConfigured: true,
+        accessControlConfigured: true,
+      },
     }),
     isTokenEncryptionReady: () => true,
     getRenewalStatus: () => ({
@@ -162,6 +168,10 @@ test('ready route reports degraded status when database check fails', async () =
     assert.equal(body.checks.googleClientConfigured, true);
     assert.equal(body.checks.googleRedirectUriConfigured, true);
     assert.equal(body.checks.canonicalPublicUrlConfigured, false);
+    assert.equal(body.checks.accessControlConfigured, true);
+    assert.equal(body.runtimeConfig.accessControl.loginAllowlistConfigured, true);
+    assert.equal(body.runtimeConfig.accessControl.connectedAccountAllowlistConfigured, true);
+    assert.equal(JSON.stringify(body.runtimeConfig.accessControl).includes('hello@pointillist.org'), false);
     assert.equal(body.runtimeConfig.publicUrl, 'https://app.example.com');
     assert.equal(body.runtimeConfig.googleRedirectUri, 'https://app.example.com/auth/google/callback');
     assert.match(body.databaseError, /db down/i);

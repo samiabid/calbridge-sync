@@ -115,7 +115,10 @@
     <% if (user) { %>
       <a href="/dashboard" class="btn">Go to Dashboard</a>
     <% } else { %>
-      <a href="/auth/google" class="btn">Connect with Google</a>
+      <a href="/auth/google" class="btn">Private Google Sign-In</a>
+      <p style="margin-top: 12px; color: rgba(255, 255, 255, 0.7); font-size: 0.9rem;">
+        Access is restricted to allowlisted Google accounts.
+      </p>
     <% } %>
   </div>
 </body>

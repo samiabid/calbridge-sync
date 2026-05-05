@@ -1,16 +1,44 @@
-import { Router, type Request } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { createOAuth2Client, getAuthUrl } from '../config/google';
+import { createOAuth2Client, getAuthUrl as buildGoogleAuthUrl } from '../config/google';
 import { google } from 'googleapis';
 import { requireAuth } from '../middleware/auth';
 import crypto from 'crypto';
 import { decryptToken, encryptToken } from '../services/tokenCrypto';
 import { getGoogleRedirectUri } from '../config/runtime';
 import { logError, logInfo, logWarn } from '../services/logger';
+import {
+  PRIVATE_APP_AUTH_MESSAGE,
+  getAccessControlSummary,
+  isGoogleAccountEmailAllowed,
+  isLoginEmailAllowed,
+  normalizeEmail,
+} from '../config/accessControl';
 
-const router = Router();
-const prisma = new PrismaClient();
+const defaultPrisma = new PrismaClient();
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
+
+interface AuthRouteDeps {
+  prisma?: any;
+  createOAuth2Client?: typeof createOAuth2Client;
+  getAuthUrl?: typeof buildGoogleAuthUrl;
+  getOAuthUserInfo?: (oauth2Client: any) => Promise<{ email?: string | null }>;
+  getRedirectUri?: typeof getGoogleRedirectUri;
+  encryptToken?: typeof encryptToken;
+  decryptToken?: typeof decryptToken;
+  isLoginEmailAllowed?: typeof isLoginEmailAllowed;
+  isGoogleAccountEmailAllowed?: typeof isGoogleAccountEmailAllowed;
+  getAccessControlSummary?: typeof getAccessControlSummary;
+  logInfo?: typeof logInfo;
+  logWarn?: typeof logWarn;
+  logError?: typeof logError;
+}
+
+async function fetchOAuthUserInfo(oauth2Client: any) {
+  const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
+  const { data } = await oauth2.userinfo.get();
+  return data;
+}
 
 function generateOAuthState(): string {
   return crypto.randomBytes(24).toString('hex');
@@ -73,350 +101,477 @@ function consumeAndValidateOAuthState(
   return { isValid: true, reauthAccountId };
 }
 
-// Redirect to Google OAuth
-router.get('/google', (req, res) => {
-  const state = generateOAuthState();
-  req.session.oauthState = state;
-  req.session.oauthStateCreatedAt = Date.now();
-  delete req.session.oauthReauthAccountId;
-  const authUrl = getAuthUrl(state);
-  logInfo('oauth_start', {
-    mode: req.session.userId ? 'session_login' : 'login',
-    redirectUri: getGoogleRedirectUri() || null,
-  });
-  res.redirect(authUrl);
-});
+function sendPrivateAppResponse(res: Response, statusCode = 403) {
+  return res.status(statusCode).send(PRIVATE_APP_AUTH_MESSAGE);
+}
 
-// Google OAuth callback - for adding additional accounts
-router.get('/google/callback', async (req, res) => {
-  const { code, state } = req.query;
+function sendPrivateAppConfigResponse(res: Response) {
+  return res
+    .status(503)
+    .send('This private calendar sync app is not configured for sign-in yet.');
+}
 
-  if (!code) {
-    return res.status(400).send('No authorization code provided');
+function encryptAccessTokenOrRespond(
+  tokens: any,
+  email: string,
+  encryptTokenFn: typeof encryptToken,
+  warn: typeof logWarn,
+  res: Response
+): string | null {
+  const accessToken = tokens.access_token;
+  if (!accessToken) {
+    warn('oauth_missing_access_token', { email });
+    res.status(400).send('Could not retrieve access token');
+    return null;
   }
+  return encryptTokenFn(accessToken);
+}
 
-  const oauthContext = consumeAndValidateOAuthState(req, state);
-  if (!oauthContext.isValid) {
-    logWarn('oauth_invalid_state', {
-      hasCode: Boolean(code),
+export function buildAuthRouter(deps: AuthRouteDeps = {}) {
+  const router = Router();
+  const prisma = deps.prisma || defaultPrisma;
+  const createOAuthClient = deps.createOAuth2Client || createOAuth2Client;
+  const getAuthUrl = deps.getAuthUrl || buildGoogleAuthUrl;
+  const getOAuthUserInfo = deps.getOAuthUserInfo || fetchOAuthUserInfo;
+  const getRedirectUri = deps.getRedirectUri || getGoogleRedirectUri;
+  const encryptTokenFn = deps.encryptToken || encryptToken;
+  const decryptTokenFn = deps.decryptToken || decryptToken;
+  const isLoginEmailAllowedFn = deps.isLoginEmailAllowed || isLoginEmailAllowed;
+  const isGoogleAccountEmailAllowedFn =
+    deps.isGoogleAccountEmailAllowed || isGoogleAccountEmailAllowed;
+  const getAccessControlSummaryFn = deps.getAccessControlSummary || getAccessControlSummary;
+  const info = deps.logInfo || logInfo;
+  const warn = deps.logWarn || logWarn;
+  const errorLog = deps.logError || logError;
+
+  // Redirect to Google OAuth
+  router.get('/google', (req, res) => {
+    const accessControl = getAccessControlSummaryFn();
+    if (!accessControl.loginAllowlistConfigured && process.env.NODE_ENV === 'production') {
+      warn('oauth_login_allowlist_missing');
+      return sendPrivateAppConfigResponse(res);
+    }
+
+    const state = generateOAuthState();
+    req.session.oauthState = state;
+    req.session.oauthStateCreatedAt = Date.now();
+    delete req.session.oauthReauthAccountId;
+    const authUrl = getAuthUrl(state);
+    info('oauth_start', {
+      mode: req.session.userId ? 'session_login' : 'login',
+      redirectUri: getRedirectUri() || null,
     });
-    return res.status(400).send('Invalid OAuth state. Please try signing in again.');
-  }
+    return res.redirect(authUrl);
+  });
 
-  try {
-    const reauthAccountId = oauthContext.reauthAccountId;
-    const oauth2Client = createOAuth2Client();
+  // Google OAuth callback - for sign-in, adding accounts, and re-authentication.
+  router.get('/google/callback', async (req, res) => {
+    const { code, state } = req.query;
 
-    // Exchange code for tokens
-    const { tokens } = await oauth2Client.getToken(code as string);
-    oauth2Client.setCredentials(tokens);
-
-    // Get user info
-    const oauth2 = google.oauth2({ version: 'v2', auth: oauth2Client });
-    const { data } = await oauth2.userinfo.get();
-
-    if (!data.email) {
-      logWarn('oauth_missing_email');
-      return res.status(400).send('Could not retrieve user email');
+    if (!code) {
+      return res.status(400).send('No authorization code provided');
     }
 
-    const accessToken = tokens.access_token;
-    if (!accessToken) {
-      logWarn('oauth_missing_access_token', {
-        email: data.email,
+    const oauthContext = consumeAndValidateOAuthState(req, state);
+    if (!oauthContext.isValid) {
+      warn('oauth_invalid_state', {
+        hasCode: Boolean(code),
       });
-      return res.status(400).send('Could not retrieve access token');
+      return res.status(400).send('Invalid OAuth state. Please try signing in again.');
     }
-    const encryptedAccessToken = encryptToken(accessToken);
 
-    // If already logged in, always attach/update this Google account on the current user.
-    if (req.session.userId) {
-      const sessionUser = await prisma.user.findUnique({
-        where: { id: req.session.userId },
-      });
+    try {
+      const reauthAccountId = oauthContext.reauthAccountId;
+      const oauth2Client = createOAuthClient();
 
-      if (!sessionUser) {
-        req.session.destroy(() => {});
-        return res.redirect('/');
+      // Exchange code for tokens.
+      const { tokens } = await oauth2Client.getToken(code as string);
+      oauth2Client.setCredentials(tokens);
+
+      // Get user info.
+      const data = await getOAuthUserInfo(oauth2Client);
+      const authenticatedEmail = normalizeEmail(data.email);
+
+      if (!authenticatedEmail) {
+        warn('oauth_missing_email');
+        return res.status(400).send('Could not retrieve user email');
       }
 
-      if (reauthAccountId) {
-        const targetAccount = await prisma.googleAccount.findUnique({
-          where: { id: reauthAccountId },
+      // If already logged in, always attach/update this Google account on the current user.
+      if (req.session.userId) {
+        const sessionUser = await prisma.user.findUnique({
+          where: { id: req.session.userId },
         });
 
-        if (!targetAccount || targetAccount.userId !== sessionUser.id) {
-          return res
-            .status(400)
-            .send('Selected account for re-authentication was not found. Please try again.');
+        if (!sessionUser) {
+          req.session.destroy(() => {});
+          return res.redirect('/');
         }
 
-        if (data.email !== targetAccount.displayName) {
-          logWarn('oauth_reauth_account_mismatch', {
-            authenticatedEmail: data.email,
-            expectedEmail: targetAccount.displayName,
+        if (!isLoginEmailAllowedFn(sessionUser.email)) {
+          warn('oauth_session_user_not_allowed', {
+            userId: sessionUser.id,
+            email: sessionUser.email,
           });
-          return res.status(400).send(
-            `Authenticated as ${data.email}, but selected account is ${targetAccount.displayName}. Please re-authenticate using the correct Google account.`
-          );
+          req.session.destroy(() => {});
+          return sendPrivateAppResponse(res);
         }
 
-        const accountRefreshToken = tokens.refresh_token || decryptToken(targetAccount.refreshToken);
-        if (!accountRefreshToken) {
-          logWarn('oauth_reauth_missing_refresh_token', {
-            email: data.email,
+        if (reauthAccountId) {
+          const targetAccount = await prisma.googleAccount.findUnique({
+            where: { id: reauthAccountId },
+          });
+
+          if (!targetAccount || targetAccount.userId !== sessionUser.id) {
+            return res
+              .status(400)
+              .send('Selected account for re-authentication was not found. Please try again.');
+          }
+
+          if (!isGoogleAccountEmailAllowedFn(targetAccount.displayName)) {
+            warn('oauth_reauth_account_not_allowed', {
+              userId: sessionUser.id,
+              accountId: targetAccount.id,
+              email: targetAccount.displayName,
+            });
+            return sendPrivateAppResponse(res);
+          }
+
+          if (normalizeEmail(authenticatedEmail) !== normalizeEmail(targetAccount.displayName)) {
+            warn('oauth_reauth_account_mismatch', {
+              authenticatedEmail,
+              expectedEmail: targetAccount.displayName,
+            });
+            return res.status(400).send(
+              `Authenticated as ${authenticatedEmail}, but selected account is ${targetAccount.displayName}. Please re-authenticate using the correct Google account.`
+            );
+          }
+
+          const encryptedAccessToken = encryptAccessTokenOrRespond(
+            tokens,
+            authenticatedEmail,
+            encryptTokenFn,
+            warn,
+            res
+          );
+          if (!encryptedAccessToken) return undefined;
+
+          const accountRefreshToken = tokens.refresh_token || decryptTokenFn(targetAccount.refreshToken);
+          if (!accountRefreshToken) {
+            warn('oauth_reauth_missing_refresh_token', {
+              email: authenticatedEmail,
+              accountId: targetAccount.id,
+            });
+            return res.status(400).send(
+              'Google did not return a refresh token for this account. Remove this app from your Google account access and reconnect.'
+            );
+          }
+
+          await prisma.googleAccount.update({
+            where: { id: targetAccount.id },
+            data: {
+              accessToken: encryptedAccessToken,
+              ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
+            },
+          });
+
+          if (targetAccount.isPrimary) {
+            await prisma.user.update({
+              where: { id: sessionUser.id },
+              data: {
+                accessToken: encryptedAccessToken,
+                ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
+              },
+            });
+          }
+
+          info('oauth_reauth_success', {
+            userId: sessionUser.id,
             accountId: targetAccount.id,
+            email: authenticatedEmail,
+            receivedRefreshToken: Boolean(tokens.refresh_token),
+          });
+          return res.redirect('/dashboard');
+        }
+
+        if (!isGoogleAccountEmailAllowedFn(authenticatedEmail)) {
+          warn('oauth_add_account_email_not_allowed', {
+            userId: sessionUser.id,
+            email: authenticatedEmail,
+          });
+          return sendPrivateAppResponse(res);
+        }
+
+        const encryptedAccessToken = encryptAccessTokenOrRespond(
+          tokens,
+          authenticatedEmail,
+          encryptTokenFn,
+          warn,
+          res
+        );
+        if (!encryptedAccessToken) return undefined;
+
+        const existingAccount = await prisma.googleAccount.findUnique({
+          where: {
+            userId_displayName: {
+              userId: sessionUser.id,
+              displayName: authenticatedEmail,
+            },
+          },
+        });
+
+        const accountRefreshToken =
+          tokens.refresh_token || (existingAccount ? decryptTokenFn(existingAccount.refreshToken) : '');
+
+        if (!existingAccount && !accountRefreshToken) {
+          warn('oauth_add_account_missing_refresh_token', {
+            email: authenticatedEmail,
           });
           return res.status(400).send(
             'Google did not return a refresh token for this account. Remove this app from your Google account access and reconnect.'
           );
         }
 
-        await prisma.googleAccount.update({
-          where: { id: targetAccount.id },
-          data: {
+        await prisma.googleAccount.upsert({
+          where: {
+            userId_displayName: {
+              userId: sessionUser.id,
+              displayName: authenticatedEmail,
+            },
+          },
+          update: {
             accessToken: encryptedAccessToken,
-            ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
+            ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
+          },
+          create: {
+            userId: sessionUser.id,
+            displayName: authenticatedEmail,
+            accessToken: encryptedAccessToken,
+            refreshToken: encryptTokenFn(accountRefreshToken),
+            isPrimary: normalizeEmail(authenticatedEmail) === normalizeEmail(sessionUser.email),
           },
         });
 
-        if (targetAccount.isPrimary) {
+        // If re-authing the primary login account, refresh User tokens too.
+        if (normalizeEmail(authenticatedEmail) === normalizeEmail(sessionUser.email)) {
           await prisma.user.update({
             where: { id: sessionUser.id },
             data: {
               accessToken: encryptedAccessToken,
-              ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
+              ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
             },
           });
         }
 
-        logInfo('oauth_reauth_success', {
+        info('oauth_add_account_success', {
           userId: sessionUser.id,
-          accountId: targetAccount.id,
-          email: data.email,
+          email: authenticatedEmail,
           receivedRefreshToken: Boolean(tokens.refresh_token),
         });
         return res.redirect('/dashboard');
       }
 
-      const existingAccount = await prisma.googleAccount.findUnique({
-        where: {
-          userId_displayName: {
-            userId: sessionUser.id,
-            displayName: data.email,
-          },
-        },
-      });
-
-      const accountRefreshToken =
-        tokens.refresh_token || (existingAccount ? decryptToken(existingAccount.refreshToken) : '');
-
-      if (!existingAccount && !accountRefreshToken) {
-        logWarn('oauth_add_account_missing_refresh_token', {
-          email: data.email,
+      // Standard login flow (no existing session).
+      if (!isLoginEmailAllowedFn(authenticatedEmail)) {
+        warn('oauth_login_email_not_allowed', {
+          email: authenticatedEmail,
         });
-        return res.status(400).send(
-          'Google did not return a refresh token for this account. Remove this app from your Google account access and reconnect.'
-        );
+        return sendPrivateAppResponse(res);
       }
 
-      await prisma.googleAccount.upsert({
-        where: {
-          userId_displayName: {
-            userId: sessionUser.id,
-            displayName: data.email,
-          },
-        },
-        update: {
-          accessToken: encryptedAccessToken,
-          ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
-        },
-        create: {
-          userId: sessionUser.id,
-          displayName: data.email,
-          accessToken: encryptedAccessToken,
-          refreshToken: encryptToken(accountRefreshToken),
-          isPrimary: data.email === sessionUser.email,
-        },
+      if (!isGoogleAccountEmailAllowedFn(authenticatedEmail)) {
+        warn('oauth_login_google_account_not_allowed', {
+          email: authenticatedEmail,
+        });
+        return sendPrivateAppResponse(res);
+      }
+
+      const encryptedAccessToken = encryptAccessTokenOrRespond(
+        tokens,
+        authenticatedEmail,
+        encryptTokenFn,
+        warn,
+        res
+      );
+      if (!encryptedAccessToken) return undefined;
+
+      const existingUser = await prisma.user.findUnique({
+        where: { email: authenticatedEmail },
       });
 
-      // If re-authing the primary login account, refresh User tokens too.
-      if (data.email === sessionUser.email) {
+      if (existingUser) {
+        const userRefreshToken =
+          tokens.refresh_token || decryptTokenFn(existingUser.refreshToken) || '';
+        if (!userRefreshToken) {
+          warn('oauth_existing_user_missing_refresh_token', {
+            email: authenticatedEmail,
+          });
+          return res.status(400).send(
+            'Google did not return a refresh token. Remove this app from your Google account access and sign in again.'
+          );
+        }
+
         await prisma.user.update({
-          where: { id: sessionUser.id },
+          where: { id: existingUser.id },
           data: {
             accessToken: encryptedAccessToken,
-            ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
+            ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
           },
         });
+
+        await prisma.googleAccount.upsert({
+          where: {
+            userId_displayName: {
+              userId: existingUser.id,
+              displayName: authenticatedEmail,
+            },
+          },
+          update: {
+            accessToken: encryptedAccessToken,
+            ...(tokens.refresh_token ? { refreshToken: encryptTokenFn(tokens.refresh_token) } : {}),
+            isPrimary: true,
+          },
+          create: {
+            userId: existingUser.id,
+            displayName: authenticatedEmail,
+            accessToken: encryptedAccessToken,
+            refreshToken: encryptTokenFn(userRefreshToken),
+            isPrimary: true,
+          },
+        });
+
+        req.session.userId = existingUser.id;
+        info('oauth_login_success', {
+          email: authenticatedEmail,
+          isNewUser: false,
+          receivedRefreshToken: Boolean(tokens.refresh_token),
+        });
+        return res.redirect('/dashboard');
       }
 
-      logInfo('oauth_add_account_success', {
-        userId: sessionUser.id,
-        email: data.email,
-        receivedRefreshToken: Boolean(tokens.refresh_token),
-      });
-      return res.redirect('/dashboard');
-    }
-
-    // Standard login flow (no existing session)
-    const existingUser = await prisma.user.findUnique({
-      where: { email: data.email },
-    });
-
-    if (existingUser) {
-      const userRefreshToken =
-        tokens.refresh_token || decryptToken(existingUser.refreshToken) || '';
-      if (!userRefreshToken) {
-        logWarn('oauth_existing_user_missing_refresh_token', {
-          email: data.email,
+      // New user.
+      if (!tokens.refresh_token) {
+        warn('oauth_new_user_missing_refresh_token', {
+          email: authenticatedEmail,
         });
         return res.status(400).send(
           'Google did not return a refresh token. Remove this app from your Google account access and sign in again.'
         );
       }
 
-      await prisma.user.update({
-        where: { id: existingUser.id },
+      const user = await prisma.user.create({
         data: {
+          email: authenticatedEmail,
           accessToken: encryptedAccessToken,
-          ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
-        },
-      });
-
-      await prisma.googleAccount.upsert({
-        where: {
-          userId_displayName: {
-            userId: existingUser.id,
-            displayName: data.email,
+          refreshToken: encryptTokenFn(tokens.refresh_token),
+          googleAccounts: {
+            create: {
+              displayName: authenticatedEmail,
+              accessToken: encryptedAccessToken,
+              refreshToken: encryptTokenFn(tokens.refresh_token),
+              isPrimary: true,
+            },
           },
         },
-        update: {
-          accessToken: encryptedAccessToken,
-          ...(tokens.refresh_token ? { refreshToken: encryptToken(tokens.refresh_token) } : {}),
-          isPrimary: true,
-        },
-        create: {
-          userId: existingUser.id,
-          displayName: data.email,
-          accessToken: encryptedAccessToken,
-          refreshToken: encryptToken(userRefreshToken),
-          isPrimary: true,
-        },
       });
 
-      req.session.userId = existingUser.id;
-      logInfo('oauth_login_success', {
-        email: data.email,
-        isNewUser: false,
-        receivedRefreshToken: Boolean(tokens.refresh_token),
+      req.session.userId = user.id;
+      info('oauth_login_success', {
+        email: authenticatedEmail,
+        isNewUser: true,
       });
       return res.redirect('/dashboard');
-    }
-
-    // New user
-    if (!tokens.refresh_token) {
-      logWarn('oauth_new_user_missing_refresh_token', {
-        email: data.email,
+    } catch (error) {
+      const message = getOAuthErrorMessage(error);
+      errorLog('oauth_callback_failed', {
+        error: error instanceof Error ? error.message : String(error),
+        providerError: (error as any)?.response?.data?.error || null,
+        redirectUri: getRedirectUri() || null,
       });
-      return res.status(400).send(
-        'Google did not return a refresh token. Remove this app from your Google account access and sign in again.'
-      );
+      return res.status(500).send(message);
     }
-
-    const user = await prisma.user.create({
-      data: {
-        email: data.email,
-        accessToken: encryptedAccessToken,
-        refreshToken: encryptToken(tokens.refresh_token),
-        googleAccounts: {
-          create: {
-            displayName: data.email,
-            accessToken: encryptedAccessToken,
-            refreshToken: encryptToken(tokens.refresh_token),
-            isPrimary: true,
-          },
-        },
-      },
-    });
-
-    req.session.userId = user.id;
-    logInfo('oauth_login_success', {
-      email: data.email,
-      isNewUser: true,
-    });
-    return res.redirect('/dashboard');
-  } catch (error) {
-    const message = getOAuthErrorMessage(error);
-    logError('oauth_callback_failed', {
-      error: error instanceof Error ? error.message : String(error),
-      providerError: (error as any)?.response?.data?.error || null,
-      redirectUri: getGoogleRedirectUri() || null,
-    });
-    res.status(500).send(message);
-  }
-});
-
-// Add another Google account (must be logged in)
-router.get('/google/add-account', requireAuth, (req, res) => {
-  const state = generateOAuthState();
-  req.session.oauthState = state;
-  req.session.oauthStateCreatedAt = Date.now();
-  delete req.session.oauthReauthAccountId;
-  const authUrl = getAuthUrl(state);
-  logInfo('oauth_start', {
-    mode: 'add_account',
-    userId: req.session.userId,
-    redirectUri: getGoogleRedirectUri() || null,
   });
-  res.redirect(authUrl);
-});
 
-// Re-authenticate an existing Google account (must be logged in)
-router.get('/google/reauth/:accountId', requireAuth, async (req, res) => {
-  try {
-    const account = await prisma.googleAccount.findUnique({
-      where: { id: req.params.accountId },
-    });
-
-    if (!account || account.userId !== req.session.userId) {
-      return res.status(404).send('Google account not found');
+  // Add another Google account (must be logged in).
+  router.get('/google/add-account', requireAuth, (req, res) => {
+    const accessControl = getAccessControlSummaryFn();
+    if (!accessControl.connectedAccountAllowlistConfigured && process.env.NODE_ENV === 'production') {
+      warn('oauth_connected_account_allowlist_missing', {
+        userId: req.session.userId,
+      });
+      return sendPrivateAppConfigResponse(res);
     }
 
     const state = generateOAuthState();
     req.session.oauthState = state;
     req.session.oauthStateCreatedAt = Date.now();
-    req.session.oauthReauthAccountId = account.id;
-
-    const authUrl = getAuthUrl(state, {
-      forceConsent: true,
-      loginHint: account.displayName,
-    });
-    logInfo('oauth_start', {
-      mode: 'reauth',
+    delete req.session.oauthReauthAccountId;
+    const authUrl = getAuthUrl(state);
+    info('oauth_start', {
+      mode: 'add_account',
       userId: req.session.userId,
-      accountId: account.id,
-      accountEmail: account.displayName,
-      redirectUri: getGoogleRedirectUri() || null,
+      redirectUri: getRedirectUri() || null,
     });
     return res.redirect(authUrl);
-  } catch (error) {
-    logError('oauth_reauth_start_failed', {
-      error: error instanceof Error ? error.message : String(error),
-      accountId: req.params.accountId,
-    });
-    return res.status(500).send('Failed to start re-authentication');
-  }
-});
-
-// Logout
-router.get('/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('Error destroying session:', err);
-    }
-    res.redirect('/');
   });
-});
 
-export default router;
+  // Re-authenticate an existing Google account (must be logged in).
+  router.get('/google/reauth/:accountId', requireAuth, async (req, res) => {
+    try {
+      const account = await prisma.googleAccount.findUnique({
+        where: { id: req.params.accountId },
+      });
+
+      if (!account || account.userId !== req.session.userId) {
+        return res.status(404).send('Google account not found');
+      }
+
+      if (!isGoogleAccountEmailAllowedFn(account.displayName)) {
+        warn('oauth_reauth_account_not_allowed', {
+          userId: req.session.userId,
+          accountId: account.id,
+          email: account.displayName,
+        });
+        return sendPrivateAppResponse(res);
+      }
+
+      const state = generateOAuthState();
+      req.session.oauthState = state;
+      req.session.oauthStateCreatedAt = Date.now();
+      req.session.oauthReauthAccountId = account.id;
+
+      const authUrl = getAuthUrl(state, {
+        forceConsent: true,
+        loginHint: account.displayName,
+      });
+      info('oauth_start', {
+        mode: 'reauth',
+        userId: req.session.userId,
+        accountId: account.id,
+        accountEmail: account.displayName,
+        redirectUri: getRedirectUri() || null,
+      });
+      return res.redirect(authUrl);
+    } catch (error) {
+      errorLog('oauth_reauth_start_failed', {
+        error: error instanceof Error ? error.message : String(error),
+        accountId: req.params.accountId,
+      });
+      return res.status(500).send('Failed to start re-authentication');
+    }
+  });
+
+  // Logout.
+  router.get('/logout', (req, res) => {
+    req.session.destroy((err) => {
+      if (err) {
+        console.error('Error destroying session:', err);
+      }
+      res.redirect('/');
+    });
+  });
+
+  return router;
+}
+
+export default buildAuthRouter();

@@ -62,6 +62,10 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       canonicalPublicUrlConfigured: runtimeConfig.canonicalPublicUrlConfigured,
       googleClientConfigured: runtimeConfig.googleClientConfigured,
       googleRedirectUriConfigured: runtimeConfig.googleRedirectUriConfigured,
+      accessControlConfigured: runtimeConfig.accessControl.accessControlConfigured,
+      loginAllowlistConfigured: runtimeConfig.accessControl.loginAllowlistConfigured,
+      connectedAccountAllowlistConfigured:
+        runtimeConfig.accessControl.connectedAccountAllowlistConfigured,
       internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
       alertWebhookConfigured: Boolean(process.env.ALERT_WEBHOOK_URL),
       webhookRenewalScheduled: getRenewalStatus().status !== 'not_scheduled',
@@ -80,6 +84,7 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
     const ok =
       checks.database &&
       checks.sessionConfigured &&
+      checks.accessControlConfigured &&
       checks.webhookRenewalScheduled &&
       webhookRenewal.status !== 'error';
 
