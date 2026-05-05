@@ -5,5 +5,6 @@ declare module 'express-session' {
     userId: string;
     oauthState?: string;
     oauthStateCreatedAt?: number;
+    oauthReauthAccountId?: string;
   }
 }

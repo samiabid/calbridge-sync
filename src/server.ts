@@ -11,7 +11,7 @@ import healthRoutes from './routes/health';
 import { setupWebhookRenewal } from './services/webhookRenewal';
 import { ensureSyncColumns } from './services/schema';
 import { isTokenEncryptionEnabled } from './services/tokenCrypto';
-import { getPublicBaseUrl } from './config/runtime';
+import { assertProductionRuntimeConfig, getPublicBaseUrl } from './config/runtime';
 import { logError, logInfo, logWarn } from './services/logger';
 
 dotenv.config();
@@ -22,9 +22,7 @@ const PgSession = connectPgSimple(session);
 const isProduction = process.env.NODE_ENV === 'production';
 const sessionSecret = process.env.SESSION_SECRET;
 
-if (isProduction && !sessionSecret) {
-  throw new Error('SESSION_SECRET must be set in production');
-}
+assertProductionRuntimeConfig();
 
 if (isProduction && !isTokenEncryptionEnabled()) {
   logWarn('token_encryption_not_configured');

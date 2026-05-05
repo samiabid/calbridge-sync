@@ -37,13 +37,15 @@ async function migrateTargetAccountIds() {
           console.log(`  Trying account ${account.displayName}...`);
           const calendar = await getAuthenticatedCalendar(sync.userId, account.id);
 
-          // Try to get the calendar to verify access
-          const calendarInfo = await calendar.calendars.get({
+          const calendarInfo = await calendar.calendarList.get({
             calendarId: sync.targetCalendarId,
           });
 
-          if (calendarInfo.data) {
-            console.log(`  ✓ Found! Account ${account.displayName} can access this calendar`);
+          if (
+            calendarInfo.data?.accessRole === 'writer' ||
+            calendarInfo.data?.accessRole === 'owner'
+          ) {
+            console.log(`  ✓ Found! Account ${account.displayName} can write to this calendar`);
             foundAccountId = account.id;
             break;
           }

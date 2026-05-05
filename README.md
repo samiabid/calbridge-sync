@@ -58,7 +58,7 @@ A two-way Google Calendar synchronization application that allows you to sync ev
    - Create OAuth 2.0 credentials (Web application)
    - Add authorized redirect URIs:
      - `http://localhost:3000/auth/google/callback` (local)
-     - `https://your-app.railway.app/auth/google/callback` (production)
+     - `https://calendar.samiabid.com/auth/google/callback` (production)
 
 3. **Configure Environment**
    ```bash
@@ -129,19 +129,24 @@ In Railway project settings, add these environment variables:
 ```
 GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=your-client-secret
-GOOGLE_REDIRECT_URI=https://your-app.railway.app/auth/google/callback
+PUBLIC_URL=https://calendar.samiabid.com
+GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
 NODE_ENV=production
 INTERNAL_CRON_TOKEN=<long-random-string>
 ```
 
-`GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` (or Railway public domain vars) is set, but Google Cloud must still allow:
-- `https://your-app.railway.app/auth/google/callback`
+`GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` is set, but Google Cloud must still allow:
+- `https://calendar.samiabid.com/auth/google/callback`
 
 ### Step 5: Update Google OAuth Settings
 
 1. Go back to Google Cloud Console
-2. Add your Railway URL to authorized redirect URIs:
-   - `https://your-app.railway.app/auth/google/callback`
+2. Configure the OAuth consent screen for production:
+   - Authorized domain: `samiabid.com`
+   - Publishing status: `In production`
+3. Add the production OAuth client URLs:
+   - Authorized JavaScript origin: `https://calendar.samiabid.com`
+   - Authorized redirect URI: `https://calendar.samiabid.com/auth/google/callback`
 
 ### Step 6: Deploy
 
@@ -176,9 +181,26 @@ The repo now includes `.github/workflows/webhook-renewal.yml`, which can trigger
 Configure these GitHub Actions secrets:
 
 ```bash
-APP_BASE_URL=https://your-app.railway.app
+APP_BASE_URL=https://calendar.samiabid.com
 INTERNAL_CRON_TOKEN=<same token configured in Railway>
 ```
+
+### Custom Domain Cutover
+
+The canonical production URL is `https://calendar.samiabid.com`. When moving the existing Railway service to that domain:
+
+1. Add `calendar.samiabid.com` as a custom domain on the existing Railway service.
+2. Add the DNS record Railway provides at your DNS provider.
+3. Wait for `https://calendar.samiabid.com/health` and `/ready` to return healthy.
+4. Set Railway variables:
+   ```bash
+   PUBLIC_URL=https://calendar.samiabid.com
+   GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
+   ```
+5. Update Google Cloud OAuth settings with authorized domain `samiabid.com`, origin `https://calendar.samiabid.com`, and redirect URI `https://calendar.samiabid.com/auth/google/callback`.
+6. Update GitHub Actions secret `APP_BASE_URL=https://calendar.samiabid.com`.
+7. Trigger protected webhook renewal so new Google channels use `https://calendar.samiabid.com/webhook/google`.
+8. Re-authenticate connected Google accounts once from the dashboard after the new scopes/domain are deployed.
 
 ### Alert Delivery
 
@@ -309,7 +331,8 @@ curl -X POST \
 
 - Verify redirect URI matches exactly in Google Console
 - Ensure Calendar API is enabled
-- Check OAuth consent screen is configured
+- Check OAuth consent screen is configured and published to production
+- Check `/ready` for `googleClientConfigured`, `googleRedirectUriConfigured`, and `canonicalPublicUrlConfigured`
 
 ### Known Issues and Field Fixes (March 2026)
 

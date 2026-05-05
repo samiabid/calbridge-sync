@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { PrismaClient } from '@prisma/client';
 import packageJson from '../../package.json';
-import { getPublicBaseUrl } from '../config/runtime';
+import { getPublicBaseUrl, getRuntimeConfigSummary } from '../config/runtime';
 import { isTokenEncryptionEnabled } from '../services/tokenCrypto';
 import { getWebhookRenewalStatus } from '../services/webhookRenewal';
 
@@ -23,6 +23,7 @@ function getAppMetadata() {
 interface HealthRouteDeps {
   queryDatabase?: () => Promise<void>;
   getPublicUrl?: () => string | null | undefined;
+  getRuntimeConfig?: () => ReturnType<typeof getRuntimeConfigSummary>;
   isTokenEncryptionReady?: () => boolean;
   getRenewalStatus?: typeof getWebhookRenewalStatus;
   getMetadata?: () => ReturnType<typeof getAppMetadata>;
@@ -36,6 +37,7 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       await prisma.$queryRawUnsafe('SELECT 1');
     });
   const getPublicUrl = deps.getPublicUrl || getPublicBaseUrl;
+  const getRuntimeConfig = deps.getRuntimeConfig || getRuntimeConfigSummary;
   const isTokenEncryptionReady = deps.isTokenEncryptionReady || isTokenEncryptionEnabled;
   const getRenewalStatus = deps.getRenewalStatus || getWebhookRenewalStatus;
   const getMetadata = deps.getMetadata || getAppMetadata;
@@ -51,11 +53,15 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
 
   router.get('/ready', async (_req, res) => {
     const timestamp = new Date().toISOString();
+    const runtimeConfig = getRuntimeConfig();
     const checks = {
       database: false,
       sessionConfigured: Boolean(process.env.DATABASE_URL) && Boolean(process.env.SESSION_SECRET || process.env.NODE_ENV !== 'production'),
       tokenEncryptionConfigured: isTokenEncryptionReady(),
       publicUrlConfigured: Boolean(getPublicUrl()),
+      canonicalPublicUrlConfigured: runtimeConfig.canonicalPublicUrlConfigured,
+      googleClientConfigured: runtimeConfig.googleClientConfigured,
+      googleRedirectUriConfigured: runtimeConfig.googleRedirectUriConfigured,
       internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
       alertWebhookConfigured: Boolean(process.env.ALERT_WEBHOOK_URL),
       webhookRenewalScheduled: getRenewalStatus().status !== 'not_scheduled',
@@ -82,6 +88,7 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       ...getMetadata(),
       timestamp,
       checks,
+      runtimeConfig,
       databaseError,
       webhookRenewal,
     });

@@ -141,10 +141,6 @@ async function findWorkingAccountForCalendar(
 
     try {
       const calendar = await getAuthenticatedCalendar(userId, account.id);
-      await withRateLimitRetry(
-        () => calendar.calendars.get({ calendarId }),
-        `finding working account for calendar ${calendarId}`
-      );
       try {
         const listEntry = await withRateLimitRetry(
           () => calendar.calendarList.get({ calendarId }),

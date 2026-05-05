@@ -453,11 +453,14 @@ router.post('/migrate/target-accounts', requireAuth, async (req, res) => {
         for (const account of accounts) {
           try {
             const calendar = await getAuthenticatedCalendar(req.session.userId!, account.id);
-            const calendarInfo = await calendar.calendars.get({
+            const calendarInfo = await calendar.calendarList.get({
               calendarId: sync.targetCalendarId,
             });
 
-            if (calendarInfo.data) {
+            if (
+              calendarInfo.data?.accessRole === 'writer' ||
+              calendarInfo.data?.accessRole === 'owner'
+            ) {
               foundAccountId = account.id;
               break;
             }

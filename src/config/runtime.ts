@@ -11,6 +11,8 @@ function normalizeDomain(domain: string): string {
   return `https://${trimmed}`;
 }
 
+export const CANONICAL_PUBLIC_URL = 'https://calendar.samiabid.com';
+
 export function getPublicBaseUrl(): string {
   const explicit = process.env.PUBLIC_URL?.trim();
   if (explicit) {
@@ -37,4 +39,40 @@ export function getGoogleRedirectUri(): string {
   }
 
   return `${baseUrl}/auth/google/callback`;
+}
+
+export function isCanonicalPublicUrlConfigured(): boolean {
+  return getPublicBaseUrl() === CANONICAL_PUBLIC_URL;
+}
+
+export function getRuntimeConfigSummary() {
+  return {
+    canonicalPublicUrl: CANONICAL_PUBLIC_URL,
+    publicUrl: getPublicBaseUrl() || null,
+    googleRedirectUri: getGoogleRedirectUri() || null,
+    canonicalPublicUrlConfigured: isCanonicalPublicUrlConfigured(),
+    googleClientConfigured: Boolean(
+      process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim()
+    ),
+    googleRedirectUriConfigured: Boolean(getGoogleRedirectUri()),
+  };
+}
+
+export function assertProductionRuntimeConfig() {
+  if (process.env.NODE_ENV !== 'production') {
+    return;
+  }
+
+  const missing: string[] = [];
+  const summary = getRuntimeConfigSummary();
+
+  if (!process.env.SESSION_SECRET?.trim()) missing.push('SESSION_SECRET');
+  if (!process.env.GOOGLE_CLIENT_ID?.trim()) missing.push('GOOGLE_CLIENT_ID');
+  if (!process.env.GOOGLE_CLIENT_SECRET?.trim()) missing.push('GOOGLE_CLIENT_SECRET');
+  if (!summary.publicUrl) missing.push('PUBLIC_URL');
+  if (!summary.googleRedirectUri) missing.push('GOOGLE_REDIRECT_URI or PUBLIC_URL');
+
+  if (missing.length > 0) {
+    throw new Error(`Missing required production config: ${missing.join(', ')}`);
+  }
 }

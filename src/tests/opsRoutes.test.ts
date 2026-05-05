@@ -129,6 +129,14 @@ test('ready route reports degraded status when database check fails', async () =
       commit: 'abc123',
     }),
     getPublicUrl: () => 'https://app.example.com',
+    getRuntimeConfig: () => ({
+      canonicalPublicUrl: 'https://calendar.samiabid.com',
+      publicUrl: 'https://app.example.com',
+      googleRedirectUri: 'https://app.example.com/auth/google/callback',
+      canonicalPublicUrlConfigured: false,
+      googleClientConfigured: true,
+      googleRedirectUriConfigured: true,
+    }),
     isTokenEncryptionReady: () => true,
     getRenewalStatus: () => ({
       status: 'healthy',
@@ -151,6 +159,11 @@ test('ready route reports degraded status when database check fails', async () =
     assert.equal(body.ok, false);
     assert.equal(body.checks.database, false);
     assert.equal(body.checks.alertWebhookConfigured, true);
+    assert.equal(body.checks.googleClientConfigured, true);
+    assert.equal(body.checks.googleRedirectUriConfigured, true);
+    assert.equal(body.checks.canonicalPublicUrlConfigured, false);
+    assert.equal(body.runtimeConfig.publicUrl, 'https://app.example.com');
+    assert.equal(body.runtimeConfig.googleRedirectUri, 'https://app.example.com/auth/google/callback');
     assert.match(body.databaseError, /db down/i);
   } finally {
     process.env.DATABASE_URL = originalDatabaseUrl;

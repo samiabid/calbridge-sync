@@ -271,28 +271,25 @@ async function assertCalendarAccess(
 ) {
   try {
     const calendar = await getAuthenticatedCalendar(userId, googleAccountId);
-    await withRateLimitRetry(
-      () => calendar.calendars.get({ calendarId }),
+    const listEntry = await withRateLimitRetry(
+      () => calendar.calendarList.get({ calendarId }),
       `verifying ${role.toLowerCase()} calendar access`
     );
+    const accessRole = listEntry.data.accessRole;
 
     if (role === 'Source') {
-      try {
-        const listEntry = await withRateLimitRetry(
-          () => calendar.calendarList.get({ calendarId }),
-          `verifying source calendar visibility level`
+      if (accessRole === 'freeBusyReader') {
+        throw new Error(
+          'Source calendar is shared as free/busy only for the selected account. Choose an account with full event visibility (Reader/Writer/Owner) to copy titles, descriptions, and meeting links.'
         );
-        if (listEntry.data.accessRole === 'freeBusyReader') {
-          throw new Error(
-            'Source calendar is shared as free/busy only for the selected account. Choose an account with full event visibility (Reader/Writer/Owner) to copy titles, descriptions, and meeting links.'
-          );
-        }
-      } catch (innerError: any) {
-        const status = getErrorStatus(innerError);
-        if (status !== 404) {
-          throw innerError;
-        }
       }
+      return;
+    }
+
+    if (accessRole !== 'writer' && accessRole !== 'owner') {
+      throw new Error(
+        'Target calendar must be writable with the selected account. Choose an account with Writer or Owner access.'
+      );
     }
   } catch (error: any) {
     if (isInvalidGrantError(error)) {
@@ -866,11 +863,13 @@ export async function syncEvent(
       for (const account of accounts) {
         try {
           const candidateCalendar = await getAuthenticatedCalendar(userId, account.id);
-          // Test if this account has access by trying a simple list operation
-          await withRateLimitRetry(
-            () => candidateCalendar.calendars.get({ calendarId: targetCalendarId }),
+          const listEntry = await withRateLimitRetry(
+            () => candidateCalendar.calendarList.get({ calendarId: targetCalendarId }),
             `detecting writable account for target calendar ${targetCalendarId}`
           );
+          if (listEntry.data.accessRole !== 'writer' && listEntry.data.accessRole !== 'owner') {
+            throw new Error('Account does not have write access to target calendar');
+          }
           calendar = candidateCalendar;
           selectedAccountId = account.id;
 
