@@ -1,6 +1,6 @@
 import cron from 'node-cron';
 import { PrismaClient } from '@prisma/client';
-import { setupWebhook } from './webhook';
+import { setupWebhook, stopWebhook } from './webhook';
 import { sendAlert } from './alerts';
 import { logError, logInfo } from './logger';
 
@@ -55,7 +55,7 @@ export async function runWebhookRenewalCheck() {
   });
 
   try {
-    // Find syncs with webhooks expiring in the next 2 days
+    // Find active syncs with missing or expiring webhooks.
     const expiringDate = new Date();
     expiringDate.setDate(expiringDate.getDate() + 2);
 
@@ -63,12 +63,19 @@ export async function runWebhookRenewalCheck() {
       where: {
         isActive: true,
         OR: [
+          { sourceChannelId: null },
+          { sourceResourceId: null },
+          { sourceExpiration: null },
           {
             sourceExpiration: {
               lte: expiringDate,
             },
           },
+          { isTwoWay: true, targetChannelId: null },
+          { isTwoWay: true, targetResourceId: null },
+          { isTwoWay: true, targetExpiration: null },
           {
+            isTwoWay: true,
             targetExpiration: {
               lte: expiringDate,
             },
@@ -87,7 +94,15 @@ export async function runWebhookRenewalCheck() {
     for (const sync of syncs) {
       try {
         // Renew source webhook
-        if (sync.sourceExpiration && sync.sourceExpiration <= expiringDate) {
+        const shouldRenewSource =
+          !sync.sourceChannelId ||
+          !sync.sourceResourceId ||
+          !sync.sourceExpiration ||
+          sync.sourceExpiration <= expiringDate;
+        const oldSourceChannelId = sync.sourceChannelId;
+        const oldSourceResourceId = sync.sourceResourceId;
+
+        if (shouldRenewSource) {
           logInfo('webhook_renewal_source_renewing', {
             syncId: sync.id,
             calendarId: sync.sourceCalendarId,
@@ -100,15 +115,33 @@ export async function runWebhookRenewalCheck() {
             sync.sourceCalendarId,
             'source'
           );
+          if (oldSourceChannelId && oldSourceResourceId) {
+            await stopWebhook(
+              sync.userId,
+              sync.sourceGoogleAccountId || sync.googleAccountId,
+              oldSourceChannelId,
+              oldSourceResourceId
+            ).catch((error) => {
+              logError('webhook_renewal_old_source_stop_failed', {
+                syncId: sync.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
           renewedCount += 1;
         }
 
         // Renew target webhook if two-way sync
-        if (
+        const shouldRenewTarget =
           sync.isTwoWay &&
-          sync.targetExpiration &&
-          sync.targetExpiration <= expiringDate
-        ) {
+          (!sync.targetChannelId ||
+            !sync.targetResourceId ||
+            !sync.targetExpiration ||
+            sync.targetExpiration <= expiringDate);
+        const oldTargetChannelId = sync.targetChannelId;
+        const oldTargetResourceId = sync.targetResourceId;
+
+        if (shouldRenewTarget) {
           logInfo('webhook_renewal_target_renewing', {
             syncId: sync.id,
             calendarId: sync.targetCalendarId,
@@ -121,6 +154,19 @@ export async function runWebhookRenewalCheck() {
             sync.targetCalendarId,
             'target'
           );
+          if (oldTargetChannelId && oldTargetResourceId) {
+            await stopWebhook(
+              sync.userId,
+              sync.targetGoogleAccountId || sync.googleAccountId,
+              oldTargetChannelId,
+              oldTargetResourceId
+            ).catch((error) => {
+              logError('webhook_renewal_old_target_stop_failed', {
+                syncId: sync.id,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
+          }
           renewedCount += 1;
         }
       } catch (error: any) {

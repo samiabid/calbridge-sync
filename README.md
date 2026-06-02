@@ -20,20 +20,22 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ## Features
 
-✅ **Two-Way Sync**: Changes in either calendar automatically sync to the other  
-✅ **Real-Time Updates**: Uses Google Calendar webhooks for instant synchronization  
-✅ **Color Filtering**: Exclude events by color (e.g., ignore all "Lavender" colored events)  
-✅ **Keyword Filtering**: Skip events containing specific keywords  
-✅ **Calendar Selection**: Choose from primary or secondary Google calendars  
-✅ **One-Way Mode**: Option to sync in only one direction  
-✅ **Initial Sync Scope Control**: Choose new events only, or backfill recurring events from the last 2 months plus all present/future events  
-✅ **Event Copy Controls**: Toggle titles, description, location, meeting links, reminders, privacy, RSVP states, and free/busy behavior  
-✅ **Event Identifier Support**: Add static text to cloned events  
-✅ **Backfill Re-Run Action**: Safely rerun missed backfill from the dashboard  
-✅ **Rate Limit Resilience**: Automatic retry/backoff for Google API 429/quota-style responses  
-✅ **OAuth Failure Safeguard**: Auto-disables a sync after repeated `invalid_grant` failures  
-✅ **Token Encryption Support**: OAuth tokens can be encrypted at rest with `TOKEN_ENCRYPTION_KEY`  
-✅ **Privacy-Focused**: Stores only required sync metadata and event mapping IDs  
+- ✅ **Two-Way Sync**: Changes in either calendar automatically sync to the other
+- ✅ **Real-Time Updates**: Uses Google Calendar webhooks for instant synchronization
+- ✅ **Color Filtering**: Exclude events by color (e.g., ignore all "Lavender" colored events)
+- ✅ **Keyword Filtering**: Skip events containing specific keywords
+- ✅ **Calendar Selection**: Choose from primary or secondary Google calendars
+- ✅ **One-Way Mode**: Option to sync in only one direction
+- ✅ **Initial Sync Scope Control**: Choose new events only, or backfill recurring events from the last 2 months plus all present/future events
+- ✅ **Event Copy Controls**: Toggle titles, description, location, meeting links, reminders, privacy, RSVP states, and free/busy behavior
+- ✅ **Event Identifier Support**: Add static text to cloned events
+- ✅ **Backfill Re-Run Action**: Safely rerun missed backfill from the dashboard
+- ✅ **Event-Level Dashboard**: Inspect live source events, statuses, failures, skips, and force-sync individual events
+- ✅ **Read-Only Production Diagnostics**: Detect duplicate mappings, webhook gaps, open failures, and disconnected accounts without cleanup side effects
+- ✅ **Rate Limit Resilience**: Automatic retry/backoff for Google API 429/quota-style responses
+- ✅ **OAuth Failure Safeguard**: Auto-disables a sync after repeated `invalid_grant` failures
+- ✅ **Token Encryption Support**: OAuth tokens are required to be encrypted at rest in production with `TOKEN_ENCRYPTION_KEY`
+- ✅ **Privacy-Focused**: Stores only required sync metadata and event mapping IDs
 
 ## Quick Start
 
@@ -64,7 +66,7 @@ A two-way Google Calendar synchronization application that allows you to sync ev
    ```bash
    cp .env.example .env
    ```
-   
+
    Edit `.env` and add your credentials:
    ```env
    DATABASE_URL="postgresql://<db_user>:<db_password>@<db_host>:5432/<db_name>"
@@ -233,6 +235,57 @@ curl -X POST \
   https://your-app.railway.app/webhook/internal/test-alert
 ```
 
+### Production Hardening Runbook
+
+Use these checks before and after production deploys:
+
+```bash
+npm audit --omit=dev
+npm test
+npm run build
+curl -sS https://calendar.samiabid.com/health
+curl -sS https://calendar.samiabid.com/ready
+```
+
+Production startup and `/ready` are intentionally fail-closed. In production, the app requires:
+- database connectivity
+- `SESSION_SECRET`
+- `TOKEN_ENCRYPTION_KEY`
+- `PUBLIC_URL` using `https://calendar.samiabid.com`
+- Google OAuth client ID/secret and redirect URI
+- `ALLOWED_LOGIN_EMAILS`
+- `ALLOWED_GOOGLE_ACCOUNT_EMAILS`
+- `INTERNAL_CRON_TOKEN`
+- webhook renewal scheduling
+
+If `/ready` is unhealthy after a deploy, do not start calendar repair work first. Fix the failing readiness check, redeploy if needed, then re-test sync behavior.
+
+### Read-Only Diagnostics
+
+Authenticated users can call:
+
+```bash
+GET /sync/diagnostics
+```
+
+The diagnostics response is read-only and reports:
+- duplicate `SyncedEvent` mappings for the same source event
+- active syncs with missing or expired webhook channel metadata
+- open sync failures
+- connected Google accounts that cannot currently list calendars
+
+Diagnostics must not be treated as cleanup approval. If duplicates, orphan clones, or bad calendar events are found in production, prepare a scoped cleanup plan first. Do not delete calendar events or database rows without explicit approval.
+
+### Mapping and Webhook Safety
+
+The sync path now keeps one active mapping for each `syncId + sourceCalendarId + sourceEventId`. If a target event was deleted and must be recreated, the stale mapping is replaced instead of leaving an additional mapping behind.
+
+New target clones use deterministic event IDs where Google Calendar allows it. This reduces duplicate target clones when multiple webhook deliveries process the same source event concurrently.
+
+Webhook processing uses an overlap-safe watermark based on observed event update times rather than blindly advancing to `now`. This can intentionally reprocess a small recent window; idempotent mapping logic should absorb that overlap.
+
+Webhook renewal now includes active syncs with missing channel metadata and attempts to stop old Google channels after replacement channels are successfully registered.
+
 ## Usage
 
 ### Creating a Sync
@@ -316,6 +369,9 @@ curl -X POST \
 - `PATCH /sync/:id/toggle` - Pause/resume sync
 - `PATCH /sync/:id/filters` - Update filters
 - `POST /sync/:id/rerun-backfill` - Re-run missed backfill safely in background
+- `GET /sync/:id/events` - List live source events in a bounded sync window with computed status
+- `POST /sync/:id/events/force-sync` - Force-sync one event while respecting current sync filters
+- `GET /sync/diagnostics` - Read-only production diagnostics for the authenticated user's syncs
 
 ### Webhooks
 - `POST /webhook/google` - Google Calendar webhook notifications

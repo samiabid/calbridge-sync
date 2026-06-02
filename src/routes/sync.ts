@@ -20,6 +20,7 @@ import {
   runSyncReconciliation,
   scanSyncOrphanClones,
 } from '../services/syncRepair';
+import { getProductionDiagnostics } from '../services/productionDiagnostics';
 import { buildSyncEventsRouter } from './syncEvents';
 
 const router = Router();
@@ -58,6 +59,16 @@ router.get('/', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('Error fetching syncs:', error);
     res.status(500).json({ error: 'Failed to fetch syncs' });
+  }
+});
+
+router.get('/diagnostics', requireAuth, async (req, res) => {
+  try {
+    const result = await getProductionDiagnostics(req.session.userId!);
+    res.json(result);
+  } catch (error: any) {
+    const message = error?.message || 'Failed to load diagnostics';
+    res.status(500).json({ error: message });
   }
 });
 

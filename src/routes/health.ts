@@ -53,7 +53,9 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
 
   router.get('/ready', async (_req, res) => {
     const timestamp = new Date().toISOString();
+    const metadata = getMetadata();
     const runtimeConfig = getRuntimeConfig();
+    const isProduction = metadata.environment === 'production';
     const checks = {
       database: false,
       sessionConfigured: Boolean(process.env.DATABASE_URL) && Boolean(process.env.SESSION_SECRET || process.env.NODE_ENV !== 'production'),
@@ -81,16 +83,27 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
     }
 
     const webhookRenewal = getRenewalStatus();
+    const productionChecksHealthy =
+      !isProduction ||
+      (checks.tokenEncryptionConfigured &&
+        checks.publicUrlConfigured &&
+        checks.canonicalPublicUrlConfigured &&
+        checks.googleClientConfigured &&
+        checks.googleRedirectUriConfigured &&
+        checks.accessControlConfigured &&
+        checks.loginAllowlistConfigured &&
+        checks.connectedAccountAllowlistConfigured &&
+        checks.internalRenewalTokenConfigured);
     const ok =
       checks.database &&
       checks.sessionConfigured &&
-      checks.accessControlConfigured &&
       checks.webhookRenewalScheduled &&
+      productionChecksHealthy &&
       webhookRenewal.status !== 'error';
 
     res.status(ok ? 200 : 503).json({
       ok,
-      ...getMetadata(),
+      ...metadata,
       timestamp,
       checks,
       runtimeConfig,

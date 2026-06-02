@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
 import { getAuthenticatedCalendar } from './calendar';
 import { setupWebhook, stopWebhook } from './webhook';
 import { isRateLimitError, sleepMs, withRateLimitRetry } from './rateLimit';
@@ -261,6 +261,75 @@ function buildTargetEventRequestBody(
       },
     },
   };
+}
+
+function getDeterministicTargetEventId(
+  syncId: string,
+  sourceCalendarId: string,
+  sourceEventId: string,
+  targetCalendarId: string
+): string {
+  // Google Calendar event IDs allow base32hex characters; hex is safely within that alphabet.
+  const digest = crypto
+    .createHash('sha256')
+    .update(`${syncId}:${sourceCalendarId}:${sourceEventId}:${targetCalendarId}`)
+    .digest('hex')
+    .slice(0, 48);
+  return `cs${digest}`;
+}
+
+async function replaceSyncedEventMapping(
+  syncId: string,
+  sourceEventId: string,
+  sourceCalendarId: string,
+  targetEventId: string,
+  targetCalendarId: string
+) {
+  const lockKey = `${syncId}:${sourceCalendarId}:${sourceEventId}`;
+
+  await prisma.$transaction(async (tx) => {
+    // Serialize mapping replacement per source event to avoid duplicate mappings during concurrent webhooks.
+    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', lockKey);
+
+    const existingMappings = await tx.syncedEvent.findMany({
+      where: {
+        syncId,
+        sourceEventId,
+        sourceCalendarId,
+      },
+      orderBy: [{ lastSyncedAt: 'desc' }, { createdAt: 'desc' }],
+    });
+
+    const [primaryMapping, ...staleMappings] = existingMappings;
+    if (primaryMapping) {
+      await tx.syncedEvent.update({
+        where: { id: primaryMapping.id },
+        data: {
+          targetEventId,
+          targetCalendarId,
+          lastSyncedAt: new Date(),
+        },
+      });
+    } else {
+      await tx.syncedEvent.create({
+        data: {
+          syncId,
+          sourceEventId,
+          sourceCalendarId,
+          targetEventId,
+          targetCalendarId,
+        },
+      });
+    }
+
+    if (staleMappings.length > 0) {
+      await tx.syncedEvent.deleteMany({
+        where: {
+          id: { in: staleMappings.map((mapping) => mapping.id) },
+        },
+      });
+    }
+  });
 }
 
 async function assertCalendarAccess(
@@ -979,6 +1048,7 @@ export async function syncEvent(
       sourceEventId: event.id,
       sourceCalendarId,
     },
+    orderBy: [{ lastSyncedAt: 'desc' }, { createdAt: 'desc' }],
   });
 
   if (existingSync) {
@@ -995,10 +1065,13 @@ export async function syncEvent(
         `updating synced event ${existingSync.targetEventId} for sync ${syncId}`
       );
 
-      await prisma.syncedEvent.update({
-        where: { id: existingSync.id },
-        data: { lastSyncedAt: new Date() },
-      });
+      await replaceSyncedEventMapping(
+        syncId,
+        event.id,
+        sourceCalendarId,
+        existingSync.targetEventId,
+        targetCalendarId
+      );
       await clearInvalidGrantFailures(syncId);
       await resolveSyncFailureByContext({
         syncId,
@@ -1253,33 +1326,60 @@ async function createSyncedEvent(
         copyRsvpStatuses: [...ALLOWED_RSVP_STATUSES],
         syncFreeEvents: true,
       } as SyncCopySettings);
-    const requestBody = buildTargetEventRequestBody(syncId, event, normalizedSettings);
-
-    const response = await withRateLimitRetry(
-      () =>
-        calendar.events.insert({
-          calendarId: targetCalendarId,
-          requestBody,
-        }),
-      `creating synced event for source event ${event.id} on sync ${syncId}`
+    const targetEventId = getDeterministicTargetEventId(
+      syncId,
+      sourceCalendarId,
+      event.id,
+      targetCalendarId
     );
+    const requestBody = {
+      ...buildTargetEventRequestBody(syncId, event, normalizedSettings),
+      id: targetEventId,
+    };
 
-    await prisma.syncedEvent.create({
-      data: {
-        syncId,
-        sourceEventId: event.id,
-        sourceCalendarId,
-        targetEventId: response.data.id!,
-        targetCalendarId,
-      },
-    });
+    let createdOrUpdatedTargetEventId = targetEventId;
+    try {
+      const response = await withRateLimitRetry(
+        () =>
+          calendar.events.insert({
+            calendarId: targetCalendarId,
+            requestBody,
+          }),
+        `creating synced event for source event ${event.id} on sync ${syncId}`
+      );
+      createdOrUpdatedTargetEventId = response.data.id || targetEventId;
+    } catch (error: any) {
+      if (getErrorStatus(error) !== 409) {
+        throw error;
+      }
+
+      const updateBody = { ...requestBody };
+      delete (updateBody as any).id;
+      await withRateLimitRetry(
+        () =>
+          calendar.events.update({
+            calendarId: targetCalendarId,
+            eventId: targetEventId,
+            requestBody: updateBody,
+          }),
+        `updating deterministic target event ${targetEventId} after create conflict`
+      );
+    }
+
+    await replaceSyncedEventMapping(
+      syncId,
+      event.id,
+      sourceCalendarId,
+      createdOrUpdatedTargetEventId,
+      targetCalendarId
+    );
     await clearInvalidGrantFailures(syncId);
     await resolveSyncFailureByContext({
       syncId,
       direction,
       action: 'create',
       sourceEventId: event.id,
-      targetEventId: response.data.id!,
+      targetEventId: createdOrUpdatedTargetEventId,
     });
     await recordSyncAudit({
       syncId,
@@ -1289,7 +1389,7 @@ async function createSyncedEvent(
       result: 'success',
       sourceEventId: event.id,
       sourceCalendarId,
-      targetEventId: response.data.id!,
+      targetEventId: createdOrUpdatedTargetEventId,
       targetCalendarId,
       eventSummary: event.summary || null,
     });
@@ -1297,7 +1397,7 @@ async function createSyncedEvent(
     logInfo('sync_target_event_created', {
       syncId,
       sourceEventId: event.id,
-      targetEventId: response.data.id!,
+      targetEventId: createdOrUpdatedTargetEventId,
       targetCalendarId,
       accountId: targetGoogleAccountId || null,
     });

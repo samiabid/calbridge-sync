@@ -70,10 +70,16 @@ export function assertProductionRuntimeConfig() {
   const summary = getRuntimeConfigSummary();
 
   if (!process.env.SESSION_SECRET?.trim()) missing.push('SESSION_SECRET');
+  if (!process.env.TOKEN_ENCRYPTION_KEY?.trim()) missing.push('TOKEN_ENCRYPTION_KEY');
   if (!process.env.GOOGLE_CLIENT_ID?.trim()) missing.push('GOOGLE_CLIENT_ID');
   if (!process.env.GOOGLE_CLIENT_SECRET?.trim()) missing.push('GOOGLE_CLIENT_SECRET');
   if (!summary.publicUrl) missing.push('PUBLIC_URL');
   if (!summary.googleRedirectUri) missing.push('GOOGLE_REDIRECT_URI or PUBLIC_URL');
+  if (!process.env.INTERNAL_CRON_TOKEN?.trim()) missing.push('INTERNAL_CRON_TOKEN');
+  if (!summary.accessControl.loginAllowlistConfigured) missing.push('ALLOWED_LOGIN_EMAILS');
+  if (!summary.accessControl.connectedAccountAllowlistConfigured) {
+    missing.push('ALLOWED_GOOGLE_ACCOUNT_EMAILS');
+  }
 
   if (missing.length > 0) {
     throw new Error(`Missing required production config: ${missing.join(', ')}`);

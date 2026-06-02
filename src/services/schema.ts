@@ -129,5 +129,6 @@ export async function ensureSyncColumns() {
     );
   } catch (error) {
     console.error('Failed to ensure Sync columns exist:', error);
+    throw error;
   }
 }

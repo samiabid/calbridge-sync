@@ -81,6 +81,28 @@ test('production runtime config fails fast when Google credentials are missing',
   );
 });
 
+test('production runtime config requires encryption, internal token, and allowlists', () => {
+  withEnv(
+    {
+      NODE_ENV: 'production',
+      SESSION_SECRET: 'secret',
+      PUBLIC_URL: 'https://calendar.samiabid.com',
+      GOOGLE_CLIENT_ID: 'client-id',
+      GOOGLE_CLIENT_SECRET: 'client-secret',
+      TOKEN_ENCRYPTION_KEY: undefined,
+      INTERNAL_CRON_TOKEN: undefined,
+      ALLOWED_LOGIN_EMAILS: undefined,
+      ALLOWED_GOOGLE_ACCOUNT_EMAILS: undefined,
+    },
+    () => {
+      assert.throws(
+        () => assertProductionRuntimeConfig(),
+        /TOKEN_ENCRYPTION_KEY.*INTERNAL_CRON_TOKEN.*ALLOWED_LOGIN_EMAILS.*ALLOWED_GOOGLE_ACCOUNT_EMAILS/
+      );
+    }
+  );
+});
+
 test('runtime config reports allowlist status without exposing email values', () => {
   withEnv(
     {

@@ -19,6 +19,7 @@ import {
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
+const WEBHOOK_WATERMARK_OVERLAP_MS = 2 * 60 * 1000;
 type RsvpStatus = (typeof ALLOWED_RSVP_STATUSES)[number];
 
 function isInvalidGrantError(error: any): boolean {
@@ -307,6 +308,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
 
   try {
     let hadInvalidGrant = false;
+    const processingStartedAt = new Date();
 
     // Use updatedMin to catch updates regardless of event start time.
     const maxLookbackMs = 7 * 24 * 60 * 60 * 1000;
@@ -558,8 +560,13 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       await clearInvalidGrantFailures(sync.id);
     }
 
+    const nextUpdatedMinBase = lastDetectedChangeAt || processingStartedAt;
+    const nextUpdatedMin = new Date(
+      Math.max(0, nextUpdatedMinBase.getTime() - WEBHOOK_WATERMARK_OVERLAP_MS)
+    );
+
     const updatePayload: Record<string, any> = {
-      [updatedMinField]: new Date(),
+      [updatedMinField]: nextUpdatedMin,
       lastSyncStatus: hadProcessingError ? 'error' : 'success',
       lastSyncError: hadProcessingError ? lastProcessingError.slice(0, 1000) : null,
     };
@@ -574,6 +581,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       syncId: sync.id,
       direction,
       hadProcessingError,
+      nextUpdatedMin: nextUpdatedMin.toISOString(),
       lastProcessingError: hadProcessingError ? lastProcessingError.slice(0, 300) : null,
     });
     if (hadProcessingError) {

@@ -20,24 +20,28 @@
     "tokens:encrypt": "tsx src/scripts/encryptStoredTokens.ts",
     "postinstall": "prisma generate"
   },
-  "keywords": ["calendar", "sync", "google-calendar"],
+  "keywords": [
+    "calendar",
+    "sync",
+    "google-calendar"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@prisma/client": "^5.22.0",
-    "express": "^4.18.2",
-    "ejs": "^3.1.10",
-    "googleapis": "^128.0.0",
-    "dotenv": "^16.3.1",
-    "express-session": "^1.17.3",
     "connect-pg-simple": "^9.0.1",
-    "uuid": "^9.0.1",
-    "node-cron": "^3.0.3"
+    "dotenv": "^16.3.1",
+    "ejs": "^3.1.10",
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "googleapis": "^128.0.0",
+    "node-cron": "^3.0.3",
+    "uuid": "^11.1.1"
   },
   "devDependencies": {
+    "@types/connect-pg-simple": "^7.0.3",
     "@types/express": "^4.17.21",
     "@types/express-session": "^1.17.10",
-    "@types/connect-pg-simple": "^7.0.3",
     "@types/node": "^20.10.5",
     "@types/node-cron": "^3.0.11",
     "@types/uuid": "^9.0.7",
@@ -47,5 +51,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

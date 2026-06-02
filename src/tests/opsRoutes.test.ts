@@ -76,6 +76,14 @@ async function invokeRoute(
   return res;
 }
 
+function restoreEnv(key: string, value: string | undefined) {
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+}
+
 test('health route returns metadata and renewal status', async () => {
   const router = buildHealthRouter({
     getMetadata: () => ({
@@ -180,6 +188,133 @@ test('ready route reports degraded status when database check fails', async () =
     process.env.SESSION_SECRET = originalSessionSecret;
     process.env.INTERNAL_CRON_TOKEN = originalInternalCronToken;
     process.env.ALERT_WEBHOOK_URL = originalAlertWebhookUrl;
+  }
+});
+
+test('ready route fails closed for missing critical production checks', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  const originalSessionSecret = process.env.SESSION_SECRET;
+  const originalInternalCronToken = process.env.INTERNAL_CRON_TOKEN;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  process.env.NODE_ENV = 'production';
+  process.env.DATABASE_URL = 'postgres://example';
+  process.env.SESSION_SECRET = 'secret';
+  delete process.env.INTERNAL_CRON_TOKEN;
+
+  const router = buildHealthRouter({
+    queryDatabase: async () => undefined,
+    getMetadata: () => ({
+      service: 'calendar-sync-app',
+      version: 'test',
+      environment: 'production',
+      commit: 'abc123',
+    }),
+    getPublicUrl: () => 'https://calendar.samiabid.com',
+    getRuntimeConfig: () => ({
+      canonicalPublicUrl: 'https://calendar.samiabid.com',
+      publicUrl: 'https://calendar.samiabid.com',
+      googleRedirectUri: 'https://calendar.samiabid.com/auth/google/callback',
+      canonicalPublicUrlConfigured: true,
+      googleClientConfigured: true,
+      googleRedirectUriConfigured: true,
+      accessControl: {
+        privateAppMode: true,
+        loginAllowlistConfigured: true,
+        connectedAccountAllowlistConfigured: true,
+        accessControlConfigured: true,
+      },
+    }),
+    isTokenEncryptionReady: () => false,
+    getRenewalStatus: () => ({
+      status: 'scheduled',
+      schedule: '0 2 * * *',
+      scheduledAt: null,
+      lastStartedAt: null,
+      lastFinishedAt: null,
+      lastSucceededAt: null,
+      lastFailedAt: null,
+      lastError: null,
+      lastRunSummary: null,
+    }),
+  });
+
+  try {
+    const response = await invokeRoute(router, 'get', '/ready');
+    const body = response.payload as any;
+
+    assert.equal(response.statusCode, 503);
+    assert.equal(body.ok, false);
+    assert.equal(body.checks.database, true);
+    assert.equal(body.checks.tokenEncryptionConfigured, false);
+    assert.equal(body.checks.internalRenewalTokenConfigured, false);
+  } finally {
+    restoreEnv('DATABASE_URL', originalDatabaseUrl);
+    restoreEnv('SESSION_SECRET', originalSessionSecret);
+    restoreEnv('INTERNAL_CRON_TOKEN', originalInternalCronToken);
+    restoreEnv('NODE_ENV', originalNodeEnv);
+  }
+});
+
+test('ready route passes when all critical production checks are healthy', async () => {
+  const originalDatabaseUrl = process.env.DATABASE_URL;
+  const originalSessionSecret = process.env.SESSION_SECRET;
+  const originalInternalCronToken = process.env.INTERNAL_CRON_TOKEN;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  process.env.NODE_ENV = 'production';
+  process.env.DATABASE_URL = 'postgres://example';
+  process.env.SESSION_SECRET = 'secret';
+  process.env.INTERNAL_CRON_TOKEN = 'token';
+
+  const router = buildHealthRouter({
+    queryDatabase: async () => undefined,
+    getMetadata: () => ({
+      service: 'calendar-sync-app',
+      version: 'test',
+      environment: 'production',
+      commit: 'abc123',
+    }),
+    getPublicUrl: () => 'https://calendar.samiabid.com',
+    getRuntimeConfig: () => ({
+      canonicalPublicUrl: 'https://calendar.samiabid.com',
+      publicUrl: 'https://calendar.samiabid.com',
+      googleRedirectUri: 'https://calendar.samiabid.com/auth/google/callback',
+      canonicalPublicUrlConfigured: true,
+      googleClientConfigured: true,
+      googleRedirectUriConfigured: true,
+      accessControl: {
+        privateAppMode: true,
+        loginAllowlistConfigured: true,
+        connectedAccountAllowlistConfigured: true,
+        accessControlConfigured: true,
+      },
+    }),
+    isTokenEncryptionReady: () => true,
+    getRenewalStatus: () => ({
+      status: 'healthy',
+      schedule: '0 2 * * *',
+      scheduledAt: '2026-03-15T00:00:00.000Z',
+      lastStartedAt: null,
+      lastFinishedAt: null,
+      lastSucceededAt: null,
+      lastFailedAt: null,
+      lastError: null,
+      lastRunSummary: null,
+    }),
+  });
+
+  try {
+    const response = await invokeRoute(router, 'get', '/ready');
+    const body = response.payload as any;
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(body.ok, true);
+  } finally {
+    restoreEnv('DATABASE_URL', originalDatabaseUrl);
+    restoreEnv('SESSION_SECRET', originalSessionSecret);
+    restoreEnv('INTERNAL_CRON_TOKEN', originalInternalCronToken);
+    restoreEnv('NODE_ENV', originalNodeEnv);
   }
 });
 
