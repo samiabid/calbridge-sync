@@ -92,4 +92,5 @@ startServer().catch((error) => {
   logError('server_start_failed', {
     error: error instanceof Error ? error.message : String(error),
   });
+  process.exit(1);
 });
