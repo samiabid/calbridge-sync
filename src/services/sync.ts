@@ -289,7 +289,7 @@ async function replaceSyncedEventMapping(
 
   await prisma.$transaction(async (tx) => {
     // Serialize mapping replacement per source event to avoid duplicate mappings during concurrent webhooks.
-    await tx.$queryRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', lockKey);
+    await tx.$executeRawUnsafe('SELECT pg_advisory_xact_lock(hashtext($1))', lockKey);
 
     const existingMappings = await tx.syncedEvent.findMany({
       where: {
