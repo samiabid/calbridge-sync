@@ -3,123 +3,164 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Calendar Sync - Two-way Google Calendar Sync</title>
+  <title>Calendar Sync — Two-way Google Calendar Sync</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
+    :root {
+      --paper:#f7f5f1; --surface:#ffffff; --surface-2:#f3f1ec; --surface-3:#ece9e2;
+      --ink:#232019; --ink-2:#57524a; --ink-3:#8c867b; --line:#e6e1d8; --line-2:#d6d0c4;
+      --accent:oklch(0.52 0.14 256); --accent-soft:oklch(0.95 0.03 256); --accent-line:oklch(0.84 0.06 256);
+      --warn:oklch(0.62 0.11 70);
+      --radius:10px; --radius-sm:7px; --radius-lg:16px;
+      --shadow-lg:0 24px 60px -18px rgba(35,32,25,0.30), 0 8px 20px -10px rgba(35,32,25,0.18);
+      --sans:'IBM Plex Sans',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+      --mono:'IBM Plex Mono',ui-monospace,Menlo,monospace;
     }
-
+    * { margin:0; padding:0; box-sizing:border-box; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
+      font-family:var(--sans); background:var(--paper); color:var(--ink);
+      min-height:100vh; display:grid; grid-template-columns:1.05fr 0.95fr;
+      -webkit-font-smoothing:antialiased;
     }
+    .eyebrow { font-family:var(--mono); font-size:11px; font-weight:500; letter-spacing:0.09em; text-transform:uppercase; color:var(--ink-3); }
 
-    .container {
-      background: white;
-      border-radius: 20px;
-      padding: 60px 40px;
-      max-width: 600px;
-      width: 100%;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      text-align: center;
+    /* left brand panel */
+    .brandside { position:relative; overflow:hidden; background:var(--ink); color:var(--paper); padding:48px 56px; display:flex; flex-direction:column; }
+    .brandside::before {
+      content:''; position:absolute; inset:0;
+      background-image:
+        linear-gradient(color-mix(in srgb, var(--paper) 6%, transparent) 1px, transparent 1px),
+        linear-gradient(90deg, color-mix(in srgb, var(--paper) 6%, transparent) 1px, transparent 1px);
+      background-size:38px 38px; mask-image:radial-gradient(120% 90% at 30% 10%, #000 30%, transparent 78%);
     }
+    .bs-top { display:flex; align-items:center; gap:12px; position:relative; }
+    .bs-mark { width:36px; height:36px; border-radius:10px; background:var(--paper); color:var(--ink); display:grid; place-items:center; }
+    .bs-name { font-weight:600; font-size:16px; }
+    .bs-sub { font-family:var(--mono); font-size:11px; opacity:.6; letter-spacing:.04em; }
+    .bs-mid { margin-top:auto; position:relative; }
+    .bs-mid h1 { font-size:38px; line-height:1.08; letter-spacing:-0.03em; font-weight:600; max-width:13ch; }
+    .bs-mid p { margin-top:16px; font-size:15px; line-height:1.55; opacity:.72; max-width:42ch; }
+    .motif { display:flex; align-items:center; gap:18px; margin-top:38px; }
+    .motif .mcal { display:flex; align-items:center; gap:11px; padding:13px 16px; border-radius:12px; background:color-mix(in srgb, var(--paper) 8%, transparent); border:1px solid color-mix(in srgb, var(--paper) 14%, transparent); }
+    .motif .mcal .sw { width:30px; height:30px; border-radius:8px; display:grid; place-items:center; color:#fff; }
+    .motif .mcal b { font-size:13.5px; display:block; }
+    .motif .mcal span { font-family:var(--mono); font-size:10.5px; opacity:.55; }
+    .motif .marrow { color:color-mix(in srgb, var(--paper) 70%, transparent); display:flex; flex-direction:column; align-items:center; gap:3px; }
+    .motif .marrow span { font-family:var(--mono); font-size:9px; letter-spacing:.06em; opacity:.6; }
+    .bs-foot { position:relative; margin-top:44px; display:flex; gap:26px; flex-wrap:wrap; }
+    .bs-stat .n { font-family:var(--mono); font-size:22px; font-weight:600; }
+    .bs-stat .l { font-size:12px; opacity:.6; margin-top:2px; }
 
-    h1 {
-      font-size: 2.5em;
-      color: #333;
-      margin-bottom: 10px;
-    }
+    /* right panel */
+    .signside { display:flex; align-items:center; justify-content:center; padding:40px; }
+    .signcard { width:100%; max-width:380px; }
+    .signcard .eyebrow { margin-bottom:10px; }
+    .signcard h2 { font-size:26px; font-weight:600; letter-spacing:-0.02em; }
+    .signcard .lede { color:var(--ink-2); margin-top:8px; font-size:14px; }
+    .gbtn { display:flex; align-items:center; justify-content:center; gap:11px; width:100%; margin-top:28px; padding:14px 18px; border-radius:var(--radius); background:var(--ink); color:var(--paper); border:1px solid var(--ink); font-family:var(--sans); font-size:14.5px; font-weight:500; cursor:pointer; transition:transform .12s, box-shadow .16s; text-decoration:none; }
+    .gbtn:hover { box-shadow:var(--shadow-lg); transform:translateY(-1px); }
+    .gbtn .gmark { width:18px; height:18px; background:#fff; border-radius:3px; display:grid; place-items:center; font-weight:700; color:var(--ink); font-size:12px; }
+    .allow { margin-top:16px; display:flex; gap:9px; align-items:flex-start; padding:12px 14px; border-radius:var(--radius-sm); background:var(--surface-2); border:1px solid var(--line); font-size:12.5px; color:var(--ink-2); line-height:1.45; }
+    .allow svg { flex:none; margin-top:1px; color:var(--ink-3); }
+    .allow b { color:var(--ink); font-weight:600; }
+    .featlist { margin-top:30px; display:grid; gap:20px; }
+    .feat { display:flex; align-items:flex-start; gap:12px; }
+    .feat .fic { width:30px; height:30px; border-radius:9px; background:var(--accent-soft); color:var(--accent); display:grid; place-items:center; flex:none; }
+    .feat b { font-size:13.5px; font-weight:600; display:block; margin-bottom:2px; }
+    .feat span { font-size:12.5px; color:var(--ink-2); line-height:1.45; }
+    .signfoot { margin-top:34px; padding-top:18px; border-top:1px solid var(--line); font-size:12px; color:var(--ink-3); display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .signfoot a { color:var(--ink-2); text-decoration:none; }
+    .signfoot a:hover { color:var(--accent); }
 
-    .subtitle {
-      color: #666;
-      font-size: 1.2em;
-      margin-bottom: 40px;
-    }
-
-    .features {
-      text-align: left;
-      margin: 40px 0;
-      padding: 0 20px;
-    }
-
-    .feature {
-      display: flex;
-      align-items: center;
-      margin: 20px 0;
-      color: #555;
-      font-size: 1.1em;
-    }
-
-    .feature::before {
-      content: "✓";
-      display: inline-block;
-      width: 30px;
-      height: 30px;
-      background: #667eea;
-      color: white;
-      border-radius: 50%;
-      text-align: center;
-      line-height: 30px;
-      margin-right: 15px;
-      font-weight: bold;
-    }
-
-    .btn {
-      background: #667eea;
-      color: white;
-      border: none;
-      padding: 15px 40px;
-      font-size: 1.2em;
-      border-radius: 50px;
-      cursor: pointer;
-      transition: all 0.3s;
-      text-decoration: none;
-      display: inline-block;
-      margin-top: 20px;
-    }
-
-    .btn:hover {
-      background: #5568d3;
-      transform: translateY(-2px);
-      box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-    }
-
-    .logo {
-      font-size: 3em;
-      margin-bottom: 20px;
+    @media (max-width:860px) {
+      body { grid-template-columns:1fr; }
+      .brandside { display:none; }
     }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="logo">📅</div>
-    <h1>Calendar Sync</h1>
-    <p class="subtitle">Two-way Google Calendar synchronization</p>
-
-    <div class="features">
-      <div class="feature">Two-way sync between multiple calendars</div>
-      <div class="feature">Real-time updates with webhooks</div>
-      <div class="feature">Filter by event colors</div>
-      <div class="feature">Filter by keywords</div>
-      <div class="feature">Choose specific calendars to sync</div>
-      <div class="feature">Privacy-focused and secure</div>
+  <section class="brandside">
+    <div class="bs-top">
+      <div class="bs-mark">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h13a4 4 0 0 1 0 8h-1"/><path d="m7 3-4 4 4 4"/><path d="M21 17H8a4 4 0 0 1 0-8h1"/><path d="m17 21 4-4-4-4"/></svg>
+      </div>
+      <div>
+        <div class="bs-name">Calendar Sync</div>
+        <div class="bs-sub">calendar.samiabid.com</div>
+      </div>
     </div>
 
-    <% if (user) { %>
-      <a href="/dashboard" class="btn">Go to Dashboard</a>
-    <% } else { %>
-      <a href="/auth/google" class="btn">Private Google Sign-In</a>
-      <p style="margin-top: 12px; color: rgba(255, 255, 255, 0.7); font-size: 0.9rem;">
-        Access is restricted to allowlisted Google accounts.
-      </p>
-    <% } %>
-  </div>
+    <div class="bs-mid">
+      <h1>Your calendars, always in sync.</h1>
+      <p>Real-time, two-way synchronization between Google Calendars — with the colour, keyword and copy-rule filters that paid services charge a subscription for.</p>
+
+      <div class="motif">
+        <div class="mcal">
+          <div class="sw" style="background:#039be5"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9h18"/><path d="M8 2.5v4"/><path d="M16 2.5v4"/></svg></div>
+          <div><b>Personal</b><span>your account</span></div>
+        </div>
+        <div class="marrow">
+          <span>two-way</span>
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M17 4l3 3-3 3"/><path d="M20 7H8a4 4 0 0 0 0 8"/><path d="M7 20l-3-3 3-3"/><path d="M4 17h12a4 4 0 0 0 0-8"/></svg>
+        </div>
+        <div class="mcal">
+          <div class="sw" style="background:#0b8043"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9h18"/><path d="M8 2.5v4"/><path d="M16 2.5v4"/></svg></div>
+          <div><b>Work</b><span>second account</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bs-foot">
+      <div class="bs-stat"><div class="n">&lt;1s</div><div class="l">webhook latency</div></div>
+      <div class="bs-stat"><div class="n">2-way</div><div class="l">real-time mirroring</div></div>
+      <div class="bs-stat"><div class="n">$0</div><div class="l">subscription fees</div></div>
+    </div>
+  </section>
+
+  <section class="signside">
+    <div class="signcard">
+      <div class="eyebrow">Private workspace</div>
+      <h2>Calendar Sync</h2>
+      <p class="lede">Two-way Google Calendar synchronization. Access is restricted to allowlisted accounts.</p>
+
+      <% if (user) { %>
+        <a href="/dashboard" class="gbtn">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 13.5 16 9"/><path d="M4 18a8 8 0 1 1 16 0"/></svg>
+          Go to Dashboard
+        </a>
+      <% } else { %>
+        <a href="/auth/google" class="gbtn">
+          <span class="gmark">G</span>
+          Private Google Sign-In
+        </a>
+        <div class="allow">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <div><b>Allowlisted only.</b> Only approved Google accounts can sign in. Tokens are encrypted at rest and only sync metadata is stored.</div>
+        </div>
+      <% } %>
+
+      <div class="featlist">
+        <div class="feat">
+          <div class="fic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z"/></svg></div>
+          <div><b>Real-time webhooks</b><span>Changes mirror across calendars in seconds, not on a schedule.</span></div>
+        </div>
+        <div class="feat">
+          <div class="fic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v5l-4 2v-7L3 5Z"/></svg></div>
+          <div><b>Colour &amp; keyword filters</b><span>Keep private events out of shared calendars automatically.</span></div>
+        </div>
+        <div class="feat">
+          <div class="fic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 10 4.6-1.5 8-5 8-10V5l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg></div>
+          <div><b>Privacy-first</b><span>No event content stored — just the IDs needed to keep clones in sync.</span></div>
+        </div>
+      </div>
+
+      <div class="signfoot">
+        <span>© 2026 · MIT licensed</span>
+        <span class="eyebrow">v1.0</span>
+      </div>
+    </div>
+  </section>
 </body>
 </html>
