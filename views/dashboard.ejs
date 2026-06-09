@@ -146,7 +146,8 @@
 
     /* sync cards */
     .sync-grid { display:grid; gap:14px; }
-    .sync { background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow-sm); overflow:hidden; transition:box-shadow .16s, border-color .16s; }
+    .sync { position:relative; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow-sm); overflow:visible; transition:box-shadow .16s, border-color .16s; }
+    .sync.menu-open { z-index:40; }
     .sync:hover { box-shadow:var(--shadow); border-color:var(--line-2); }
     .sync.paused { background:repeating-linear-gradient(135deg, var(--surface), var(--surface) 11px, var(--surface-2) 11px, var(--surface-2) 22px); }
     .sync-main { display:flex; align-items:flex-start; gap:18px; padding:18px 20px; }
@@ -161,7 +162,7 @@
     .flow-arrow .lbl { font-family:var(--mono); font-size:9px; letter-spacing:0.06em; color:var(--ink-3); text-transform:uppercase; }
     .sync-right { display:flex; flex-direction:column; align-items:flex-end; gap:10px; flex:none; }
     .sync-actions { display:flex; align-items:center; gap:6px; }
-    .sync-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:12px 20px; border-top:1px solid var(--line); background:var(--surface-2); }
+    .sync-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:12px 20px; border-top:1px solid var(--line); border-radius:0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px); background:var(--surface-2); }
     .sync-foot .filters { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .sync-foot .meta-time { font-size:11.5px; color:var(--ink-3); font-family:var(--mono); }
     .pill { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; font-size:12px; padding:4px 10px; border-radius:var(--radius-sm); background:var(--surface); border:1px solid var(--line); color:var(--ink-2); }
@@ -807,15 +808,22 @@
     document.addEventListener('click', (e) => {
       const toggle = e.target.closest('[data-menu-toggle]');
       const openMenus = document.querySelectorAll('.menu.open');
+      const closeMenu = (menu) => {
+        menu.classList.remove('open');
+        menu.closest('.sync')?.classList.remove('menu-open');
+      };
       if (toggle) {
         const menu = toggle.parentElement.querySelector('.menu');
         const isOpen = menu.classList.contains('open');
-        openMenus.forEach(m => m.classList.remove('open'));
-        if (!isOpen) menu.classList.add('open');
+        openMenus.forEach(closeMenu);
+        if (!isOpen) {
+          menu.classList.add('open');
+          menu.closest('.sync')?.classList.add('menu-open');
+        }
         e.stopPropagation();
         return;
       }
-      if (!e.target.closest('.menu')) openMenus.forEach(m => m.classList.remove('open'));
+      if (!e.target.closest('.menu')) openMenus.forEach(closeMenu);
     });
 
     /* ---------- mobile rail toggle ---------- */
