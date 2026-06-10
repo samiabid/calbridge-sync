@@ -6,6 +6,8 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ## Screenshots
 
+Screenshots use fictional calendar names and example email addresses.
+
 ### Home (Desktop)
 
 ![Home desktop](docs/screenshots/home-desktop.png)
@@ -14,9 +16,9 @@ A two-way Google Calendar synchronization application that allows you to sync ev
 
 ![Home mobile](docs/screenshots/home-mobile.png)
 
-### Dashboard (Unauthenticated Redirect View)
+### Dashboard (Syncs)
 
-![Dashboard unauthenticated](docs/screenshots/dashboard-unauth.png)
+![Dashboard syncs](docs/screenshots/dashboard-overview.png)
 
 ## Features
 
@@ -135,8 +137,8 @@ PUBLIC_URL=https://calendar.samiabid.com
 GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
 NODE_ENV=production
 INTERNAL_CRON_TOKEN=<long-random-string>
-ALLOWED_LOGIN_EMAILS=hello@pointillist.org
-ALLOWED_GOOGLE_ACCOUNT_EMAILS=hello@pointillist.org,sami@solvaa.co.uk
+ALLOWED_LOGIN_EMAILS=owner@example.com
+ALLOWED_GOOGLE_ACCOUNT_EMAILS=owner@example.com,work@example.com
 ```
 
 `GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` is set, but Google Cloud must still allow:
@@ -204,8 +206,8 @@ The canonical production URL is `https://calendar.samiabid.com`. When moving the
    ```bash
    PUBLIC_URL=https://calendar.samiabid.com
    GOOGLE_REDIRECT_URI=https://calendar.samiabid.com/auth/google/callback
-   ALLOWED_LOGIN_EMAILS=hello@pointillist.org
-   ALLOWED_GOOGLE_ACCOUNT_EMAILS=hello@pointillist.org,sami@solvaa.co.uk
+   ALLOWED_LOGIN_EMAILS=owner@example.com
+   ALLOWED_GOOGLE_ACCOUNT_EMAILS=owner@example.com,work@example.com
    ```
 5. Update Google Cloud OAuth settings with authorized domain `samiabid.com`, origin `https://calendar.samiabid.com`, and redirect URI `https://calendar.samiabid.com/auth/google/callback`.
 6. Update GitHub Actions secret `APP_BASE_URL=https://calendar.samiabid.com`.

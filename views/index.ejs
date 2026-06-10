@@ -75,8 +75,13 @@
     .signfoot a:hover { color:var(--accent); }
 
     @media (max-width:860px) {
-      body { grid-template-columns:1fr; }
+      html, body { max-width:100%; overflow-x:hidden; }
+      body { grid-template-columns:minmax(0, 1fr); }
       .brandside { display:none; }
+      .signside { width:100vw; max-width:100vw; min-width:0; padding:32px 20px; overflow:hidden; }
+      .signcard { width:100%; max-width:calc(100vw - 40px); min-width:0; }
+      .gbtn, .allow, .feat { min-width:0; }
+      .signcard p, .allow, .feat span { overflow-wrap:anywhere; }
     }
   </style>
 </head>
