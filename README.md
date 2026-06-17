@@ -139,6 +139,7 @@ NODE_ENV=production
 INTERNAL_CRON_TOKEN=<long-random-string>
 ALLOWED_LOGIN_EMAILS=owner@example.com
 ALLOWED_GOOGLE_ACCOUNT_EMAILS=owner@example.com,work@example.com
+SYNC_FUTURE_DAYS=365
 ```
 
 `GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` is set, but Google Cloud must still allow:
@@ -147,6 +148,10 @@ ALLOWED_GOOGLE_ACCOUNT_EMAILS=owner@example.com,work@example.com
 `ALLOWED_LOGIN_EMAILS` controls who can sign into the app. `ALLOWED_GOOGLE_ACCOUNT_EMAILS`
 controls which Google calendar accounts an allowlisted user can connect or re-authenticate.
 Both values are required in production for `/ready` to be healthy.
+
+`SYNC_FUTURE_DAYS` is optional and defaults to `365`. It bounds webhook and initial backfill
+expansion of future recurring events so a long-running series does not consume Google Calendar
+quota by syncing decades of instances.
 
 ### Step 5: Update Google OAuth Settings
 
@@ -412,6 +417,10 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
 - Need to clean up previously bad cloned events in destination.
   - Safe approach: only delete events in the destination calendar that were created by this sync (`privateExtendedProperty syncId=<SYNC_ID>`) and only from a chosen start date.
   - Do not run broad calendar deletes; always scope by both destination calendar ID and sync ID.
+- Google reports rate-limit exceeded during webhook or backfill processing.
+  - Cause: updated recurring events can expand into a very large number of future instances.
+  - Fix: current webhook and initial backfill reads are bounded by `SYNC_FUTURE_DAYS` with a default of 365 days.
+  - Avoid repeatedly re-running backfill while rate-limited; let webhook processing catch up after the bounded-window fix is deployed.
 
 ### Deploy Checklist for These Fixes
 

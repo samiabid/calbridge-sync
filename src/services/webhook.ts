@@ -7,6 +7,7 @@ import { getPublicBaseUrl } from '../config/runtime';
 import { recordSyncAudit, type SyncDirection } from './syncAudit';
 import { sendAlert } from './alerts';
 import { logError, logInfo, logWarn } from './logger';
+import { getSyncFutureWindowEnd, normalizeSyncFutureDays } from './syncWindow';
 import {
   ALLOWED_RSVP_STATUSES,
   buildCancellationState,
@@ -309,6 +310,8 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
   try {
     let hadInvalidGrant = false;
     const processingStartedAt = new Date();
+    const futureWindowEnd = getSyncFutureWindowEnd(processingStartedAt);
+    const futureWindowDays = normalizeSyncFutureDays(process.env.SYNC_FUTURE_DAYS);
 
     // Use updatedMin to catch updates regardless of event start time.
     const maxLookbackMs = 7 * 24 * 60 * 60 * 1000;
@@ -328,7 +331,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
     }
 
     console.log(
-      `Fetching updates from calendar ${sourceCalendarId} since ${effectiveUpdatedMin.toISOString()}`
+      `Fetching updates from calendar ${sourceCalendarId} since ${effectiveUpdatedMin.toISOString()} through ${futureWindowEnd.toISOString()}`
     );
 
     const events: any[] = [];
@@ -340,6 +343,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
           calendar.events.list({
             calendarId: sourceCalendarId,
             updatedMin: minDate.toISOString(),
+            timeMax: futureWindowEnd.toISOString(),
             showDeleted: true,
             maxResults: 250,
             singleEvents: true,
@@ -581,6 +585,7 @@ export async function handleWebhookNotification(channelId: string, resourceId: s
       syncId: sync.id,
       direction,
       hadProcessingError,
+      futureWindowDays,
       nextUpdatedMin: nextUpdatedMin.toISOString(),
       lastProcessingError: hadProcessingError ? lastProcessingError.slice(0, 300) : null,
     });

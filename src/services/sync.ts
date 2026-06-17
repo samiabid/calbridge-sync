@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { getAuthenticatedCalendar } from './calendar';
 import { setupWebhook, stopWebhook } from './webhook';
 import { isRateLimitError, sleepMs, withRateLimitRetry } from './rateLimit';
+import { getSyncFutureWindowEnd, normalizeSyncFutureDays } from './syncWindow';
 import {
   recordSyncAudit,
   recordSyncFailure,
@@ -742,6 +743,8 @@ export async function performInitialSync(
   const now = new Date();
   const historyStart = new Date(now);
   historyStart.setMonth(historyStart.getMonth() - INITIAL_SYNC_PAST_MONTHS);
+  const futureWindowEnd = getSyncFutureWindowEnd(now);
+  const futureWindowDays = normalizeSyncFutureDays(process.env.SYNC_FUTURE_DAYS);
   const rsvpStatuses = normalizeRsvpStatuses(sync.copyRsvpStatuses);
 
   let pageToken: string | undefined;
@@ -751,14 +754,15 @@ export async function performInitialSync(
   let skippedByFilterCount = 0;
   let errorCount = 0;
 
-  // Backfill from 2 months ago through all present/future pages.
-  // No timeMax is set so setup sync captures upcoming events too.
+  // Backfill from 2 months ago through a bounded future window.
+  // Unbounded recurring expansion can produce decades of instances and exhaust Google quota.
   do {
     const response = await withRateLimitRetry(
       () =>
         sourceCalendar.events.list({
           calendarId: sync.sourceCalendarId,
           timeMin: historyStart.toISOString(),
+          timeMax: futureWindowEnd.toISOString(),
           maxResults: 250,
           singleEvents: true,
           orderBy: 'startTime',
@@ -817,7 +821,7 @@ export async function performInitialSync(
   } while (pageToken);
 
   console.log(
-    `Initial sync completed for sync ${syncId}: scanned=${scannedCount}, synced=${syncedCount}, skippedWindow=${skippedByWindowCount}, skippedFilters=${skippedByFilterCount}, errors=${errorCount}, mode=${syncStartMode}, historyMonths=${INITIAL_SYNC_PAST_MONTHS}`
+    `Initial sync completed for sync ${syncId}: scanned=${scannedCount}, synced=${syncedCount}, skippedWindow=${skippedByWindowCount}, skippedFilters=${skippedByFilterCount}, errors=${errorCount}, mode=${syncStartMode}, historyMonths=${INITIAL_SYNC_PAST_MONTHS}, futureDays=${futureWindowDays}`
   );
 }
 
