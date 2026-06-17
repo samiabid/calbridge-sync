@@ -574,6 +574,10 @@
                 <div class="form-group"><label for="eventDirectionSelector">Direction</label><select id="eventDirectionSelector" class="select"></select></div>
                 <div class="form-group"><label for="eventDaysBack">Days Back</label><input type="number" id="eventDaysBack" min="0" max="730" value="30"></div>
                 <div class="form-group"><label for="eventDaysForward">Days Forward</label><input type="number" id="eventDaysForward" min="0" max="730" value="365"></div>
+                <div class="form-group" style="min-width:220px; flex:1;">
+                  <label for="eventSearchInput">Search Event Title</label>
+                  <input type="search" id="eventSearchInput" placeholder="e.g. Matt, interview, gym">
+                </div>
                 <div class="form-group"><label for="eventPageSize">Page Size</label><select id="eventPageSize" class="select"><option value="10">10</option><option value="25" selected>25</option><option value="50">50</option></select></div>
                 <div class="form-group"><button class="btn btn-primary" type="button" onclick="loadSyncEvents({ resetPage: true })" style="height:38px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 4v5h-5"/></svg>Load events</button></div>
               </div>
@@ -855,6 +859,7 @@
       direction: syncsData[0]?.isTwoWay ? 'all' : 'source_to_target',
       daysBack: 30,
       daysForward: 365,
+      search: '',
       page: 1,
       pageSize: 25,
     };
@@ -1385,10 +1390,17 @@
       const summary = document.getElementById('eventsSummary');
       if (!summary) return;
       const total = data?.total || 0;
-      if (total === 0) { summary.textContent = 'No live source events found in the selected window.'; return; }
+      const search = data?.search || eventsDashboardState.search || '';
+      if (total === 0) {
+        summary.textContent = search
+          ? `No live source events matching "${search}" found in the selected window.`
+          : 'No live source events found in the selected window.';
+        return;
+      }
       const startIndex = ((data.page || 1) - 1) * (data.pageSize || 25) + 1;
       const endIndex = Math.min(total, startIndex + (data.items?.length || 0) - 1);
-      summary.textContent = `Showing ${startIndex}-${endIndex} of ${total} events for ${data.syncLabel} (${data.window.daysBack}d back / ${data.window.daysForward}d forward).`;
+      const matchText = search ? ` matching "${search}"` : '';
+      summary.textContent = `Showing ${startIndex}-${endIndex} of ${total}${matchText} events for ${data.syncLabel} (${data.window.daysBack}d back / ${data.window.daysForward}d forward).`;
     }
 
     function syncEventsStateFromControls(resetPage = false) {
@@ -1396,12 +1408,14 @@
       const directionSelector = document.getElementById('eventDirectionSelector');
       const daysBackInput = document.getElementById('eventDaysBack');
       const daysForwardInput = document.getElementById('eventDaysForward');
+      const searchInput = document.getElementById('eventSearchInput');
       const pageSizeSelect = document.getElementById('eventPageSize');
-      if (!syncSelector || !directionSelector || !daysBackInput || !daysForwardInput || !pageSizeSelect) return;
+      if (!syncSelector || !directionSelector || !daysBackInput || !daysForwardInput || !searchInput || !pageSizeSelect) return;
       eventsDashboardState.syncId = syncSelector.value;
       eventsDashboardState.direction = directionSelector.value;
       eventsDashboardState.daysBack = Number(daysBackInput.value || 30);
       eventsDashboardState.daysForward = Number(daysForwardInput.value || 365);
+      eventsDashboardState.search = searchInput.value.trim();
       eventsDashboardState.pageSize = Number(pageSizeSelect.value || 25);
       if (resetPage) eventsDashboardState.page = 1;
     }
@@ -1425,12 +1439,14 @@
           page: String(eventsDashboardState.page),
           pageSize: String(eventsDashboardState.pageSize),
         });
+        if (eventsDashboardState.search) params.set('search', eventsDashboardState.search);
         const response = await fetch(`/sync/${eventsDashboardState.syncId}/events?${params.toString()}`);
         const data = await response.json();
         if (!response.ok) { summary.textContent = data?.error || 'Failed to load sync events.'; container.innerHTML = `<div class="table-empty">${escapeHtml(data?.error || 'Failed to load sync events.')}</div>`; return; }
         eventsDashboardState.page = data.page;
         eventsDashboardState.pageSize = data.pageSize;
         eventsDashboardState.direction = data.direction;
+        eventsDashboardState.search = data.search || eventsDashboardState.search || '';
         updateEventsSummary(data);
         renderEventsTable(data);
       } catch (error) { console.error('Error loading sync events:', error); summary.textContent = 'Failed to load sync events.'; container.innerHTML = '<div class="table-empty">Failed to load sync events.</div>'; }
@@ -1465,6 +1481,16 @@
       if (directionSelector) directionSelector.addEventListener('change', () => loadSyncEvents({ resetPage: true }));
       const pageSizeSelect = document.getElementById('eventPageSize');
       if (pageSizeSelect) { pageSizeSelect.value = String(eventsDashboardState.pageSize); pageSizeSelect.addEventListener('change', () => loadSyncEvents({ resetPage: true })); }
+      const searchInput = document.getElementById('eventSearchInput');
+      if (searchInput) {
+        searchInput.value = eventsDashboardState.search || '';
+        searchInput.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            loadSyncEvents({ resetPage: true });
+          }
+        });
+      }
       ['eventDaysBack', 'eventDaysForward'].forEach((id) => { const input = document.getElementById(id); if (input) input.addEventListener('change', () => loadSyncEvents({ resetPage: true })); });
       loadSyncEvents({ resetPage: true });
     }

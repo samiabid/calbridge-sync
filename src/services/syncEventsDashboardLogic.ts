@@ -54,6 +54,18 @@ export function normalizeEventsPageSize(input: unknown): number {
   return Math.min(MAX_EVENTS_PAGE_SIZE, normalizePositiveInteger(input, DEFAULT_EVENTS_PAGE_SIZE));
 }
 
+export function normalizeEventSearch(input: unknown): string {
+  return typeof input === 'string' ? input.trim().replace(/\s+/g, ' ') : '';
+}
+
+export function eventMatchesSearch(event: any, searchInput: unknown): boolean {
+  const search = normalizeEventSearch(searchInput).toLowerCase();
+  if (!search) return true;
+
+  const summary = String(event?.summary || '').toLowerCase();
+  return summary.includes(search);
+}
+
 export function normalizeSyncEventDirection(
   input: unknown,
   isTwoWay: boolean
@@ -192,4 +204,5 @@ export const syncEventsDashboardDefaults = {
   daysForward: DEFAULT_REPAIR_DAYS_FORWARD,
   page: DEFAULT_EVENTS_PAGE,
   pageSize: DEFAULT_EVENTS_PAGE_SIZE,
+  search: '',
 };

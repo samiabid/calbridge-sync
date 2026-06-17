@@ -16,6 +16,8 @@ import {
   computeSyncEventStatus,
   getRequestedDirections,
   getSyncEventSortTime,
+  eventMatchesSearch,
+  normalizeEventSearch,
   normalizeForceSyncDirection,
   normalizeSyncEventDirection,
   paginateSyncEventRows,
@@ -94,6 +96,7 @@ export interface ListSyncDashboardEventsResult {
   window: ReturnType<typeof buildSyncEventsWindow>;
   page: number;
   pageSize: number;
+  search: string;
   total: number;
   totalPages: number;
   items: SyncDashboardEventItem[];
@@ -401,11 +404,13 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       direction?: unknown;
       page?: unknown;
       pageSize?: unknown;
+      search?: unknown;
     } = {}
   ): Promise<ListSyncDashboardEventsResult> {
     const sync = await getSyncOrThrow(syncId, userId);
     const direction = normalizeSyncEventDirection(options.direction, sync.isTwoWay);
     const window = buildSyncEventsWindow(options.daysBack, options.daysForward);
+    const search = normalizeEventSearch(options.search);
     const contexts = buildDirectionContexts(sync, direction);
 
     const rows: DashboardSourceEventRow[] = (
@@ -438,9 +443,11 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       return String(left.event.id).localeCompare(String(right.event.id));
     });
 
-    const { failureMap, mappingMap } = await getOverlayMaps(sync.id, userId, rows);
+    const filteredRows = rows.filter((row) => eventMatchesSearch(row.event, search));
+
+    const { failureMap, mappingMap } = await getOverlayMaps(sync.id, userId, filteredRows);
     const items = await Promise.all(
-      rows.map((row) => buildDashboardEventItem(sync, row, failureMap, mappingMap))
+      filteredRows.map((row) => buildDashboardEventItem(sync, row, failureMap, mappingMap))
     );
     const paginated = paginateSyncEventRows(items, options.page, options.pageSize);
 
@@ -450,6 +457,7 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       isTwoWay: sync.isTwoWay,
       direction,
       window,
+      search,
       page: paginated.page,
       pageSize: paginated.pageSize,
       total: paginated.total,

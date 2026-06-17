@@ -141,6 +141,68 @@ test('event list combines directions and computes failed/synced/skipped/not_sync
   );
 });
 
+test('event list search filters by summary before pagination', async () => {
+  const sync = buildSyncRecord({ isTwoWay: false, excludedKeywords: [] });
+  const calendar = {
+    events: {
+      list: async () => ({
+        data: {
+          items: [
+            {
+              id: 'event-a',
+              summary: 'Matt planning',
+              start: { dateTime: '2026-03-16T10:00:00.000Z' },
+              end: { dateTime: '2026-03-16T11:00:00.000Z' },
+            },
+            {
+              id: 'event-b',
+              summary: 'Finance review',
+              start: { dateTime: '2026-03-16T12:00:00.000Z' },
+              end: { dateTime: '2026-03-16T13:00:00.000Z' },
+            },
+            {
+              id: 'event-c',
+              summary: 'Matt follow-up',
+              start: { dateTime: '2026-03-17T10:00:00.000Z' },
+              end: { dateTime: '2026-03-17T11:00:00.000Z' },
+            },
+          ],
+        },
+      }),
+    },
+  };
+
+  const service = buildSyncEventsDashboardService({
+    prisma: {
+      sync: {
+        findFirst: async () => sync,
+      },
+      syncFailure: {
+        findMany: async () => [],
+      },
+      syncedEvent: {
+        findMany: async () => [],
+      },
+    },
+    getCalendar: (async () => calendar) as any,
+    rateLimitRetry: async (fn) => fn(),
+  });
+
+  const result = await service.listSyncDashboardEvents(sync.id, sync.userId, {
+    search: '  matt   ',
+    page: 2,
+    pageSize: 1,
+  });
+
+  assert.equal(result.search, 'matt');
+  assert.equal(result.total, 2);
+  assert.equal(result.page, 2);
+  assert.deepEqual(
+    result.items.map((item) => item.sourceEventId),
+    ['event-c']
+  );
+});
+
 test('force sync loads the source event and returns skipped for filtered events', async () => {
   const sync = buildSyncRecord({ isTwoWay: false });
   const getCalls: any[] = [];

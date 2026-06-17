@@ -25,6 +25,7 @@ export function buildSyncEventsRouter(deps: SyncEventsRouteDeps = {}) {
         direction: req.query?.direction,
         page: req.query?.page,
         pageSize: req.query?.pageSize,
+        search: req.query?.search,
       });
       res.json(result);
     } catch (error: any) {

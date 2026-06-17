@@ -121,13 +121,17 @@ test('event routes reject unauthorized requests through auth middleware', async 
 });
 
 test('event list route returns the dashboard payload for authorized requests', async () => {
+  let forwardedOptions: Record<string, unknown> = {};
   const router = buildSyncEventsRouter({
     authMiddleware: (_req, _res, next) => next(),
-    listEvents: async (_syncId, _userId, options = {}) => ({
+    listEvents: async (_syncId, _userId, options = {}) => {
+      forwardedOptions = options;
+      return {
       syncId: 'sync-1',
       syncLabel: 'Source -> Target',
       isTwoWay: true,
       direction: 'all',
+      search: String(options.search || ''),
       window: {
         daysBack: 30,
         daysForward: 365,
@@ -159,13 +163,14 @@ test('event list route returns the dashboard payload for authorized requests', a
           failureId: null,
         },
       ],
-    }),
+    };
+    },
   });
 
   const response = await invokeRoute(router, 'get', '/:id/events', {
     session: { userId: 'user-1' },
     params: { id: 'sync-1' },
-    query: { page: '2', pageSize: '50' },
+    query: { page: '2', pageSize: '50', search: 'Matt' },
   });
   const body = response.payload as any;
 
@@ -173,6 +178,8 @@ test('event list route returns the dashboard payload for authorized requests', a
   assert.equal(body.syncId, 'sync-1');
   assert.equal(body.page, 2);
   assert.equal(body.pageSize, 50);
+  assert.equal(body.search, 'Matt');
+  assert.equal(forwardedOptions.search, 'Matt');
   assert.equal(body.items[0].status, 'synced');
 });
 

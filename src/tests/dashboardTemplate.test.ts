@@ -9,6 +9,8 @@ test('dashboard template includes the event-level sync dashboard controls', asyn
 
   assert.match(template, /<h2>Events<\/h2>/i);
   assert.match(template, /id="eventSyncSelector"/i);
+  assert.match(template, /id="eventSearchInput"/i);
+  assert.match(template, /Search Event Title/i);
   assert.match(template, /id="eventsTableContainer"/i);
   assert.match(template, /Force Sync/i);
   assert.match(template, /not_synced/i);
