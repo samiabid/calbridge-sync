@@ -15,3 +15,18 @@ test('dashboard template includes the event-level sync dashboard controls', asyn
   assert.match(template, /Force Sync/i);
   assert.match(template, /not_synced/i);
 });
+
+test('event identifier control explains and enforces destination-title precedence', async () => {
+  const templatePath = path.join(process.cwd(), 'views', 'dashboard.ejs');
+  const template = await fs.readFile(templatePath, 'utf8');
+
+  assert.match(template, /Destination Event Title \/ Identifier \(optional\)/);
+  assert.match(
+    template,
+    /If set, this exact text replaces the source event title on destination events\. It is never added to the description\./
+  );
+  assert.match(template, /id="eventIdentifier" maxlength="64"/);
+  assert.match(template, /id="syncEventTitlesOption"/);
+  assert.match(template, /titleCheckbox\.disabled = hasIdentifier/);
+  assert.match(template, /addEventListener\('input', updateEventIdentifierTitleState\)/);
+});

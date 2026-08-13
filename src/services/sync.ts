@@ -15,13 +15,13 @@ import { logError, logInfo, logWarn } from './logger';
 import {
   ALLOWED_RSVP_STATUSES,
   eventHasAnyCopyableDetails,
-  getEventMeetingLink,
   getEventSelfResponseStatus,
   isDetailPlaceholderSummary,
   needsReadableSourceDetails,
   normalizeRsvpStatuses,
   shouldSkipEvent,
 } from './syncLogic';
+import { buildTargetEventRequestBody } from './syncEventPayload';
 
 const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
@@ -193,76 +193,6 @@ async function clearInvalidGrantFailures(syncId: string) {
   });
 }
 
-
-function getNormalizedEventIdentifier(settings: SyncCopySettings): string | null {
-  if (!settings.eventIdentifier) return null;
-  const value = settings.eventIdentifier.trim();
-  return value.length > 0 ? value : null;
-}
-
-function getTargetEventDescription(
-  event: any,
-  settings: SyncCopySettings,
-  includeEventIdentifier: boolean
-): string | undefined {
-  const parts: string[] = [];
-
-  if (settings.syncEventDescription && typeof event?.description === 'string' && event.description.trim()) {
-    parts.push(event.description.trim());
-  }
-
-  if (settings.syncMeetingLinks) {
-    const meetingLink = getEventMeetingLink(event);
-    if (meetingLink) {
-      const currentText = parts.join('\n\n');
-      if (!currentText.includes(meetingLink)) {
-        parts.push(`Meeting Link: ${meetingLink}`);
-      }
-    }
-  }
-
-  const eventIdentifier = getNormalizedEventIdentifier(settings);
-  if (includeEventIdentifier && eventIdentifier) {
-    parts.push(eventIdentifier);
-  }
-
-  if (parts.length === 0) return undefined;
-  return parts.join('\n\n');
-}
-
-function buildTargetEventRequestBody(
-  syncId: string,
-  event: any,
-  settings: SyncCopySettings
-) {
-  const eventIdentifier = getNormalizedEventIdentifier(settings);
-  const useIdentifierAsSummary = !settings.syncEventTitles && Boolean(eventIdentifier);
-  const summary = settings.syncEventTitles
-    ? (typeof event?.summary === 'string' && event.summary.trim().length > 0 ? event.summary : 'Busy')
-    : eventIdentifier || 'Busy';
-
-  return {
-    summary,
-    description: getTargetEventDescription(event, settings, !useIdentifierAsSummary),
-    start: event.start,
-    end: event.end,
-    location: settings.syncEventLocation ? event.location : undefined,
-    colorId: event.colorId,
-    visibility: settings.markEventPrivate ? 'private' : event.visibility,
-    reminders: settings.disableRemindersForClones
-      ? {
-          useDefault: false,
-          overrides: [],
-        }
-      : event.reminders,
-    extendedProperties: {
-      private: {
-        syncId,
-        originalEventId: event.id,
-      },
-    },
-  };
-}
 
 function getDeterministicTargetEventId(
   syncId: string,

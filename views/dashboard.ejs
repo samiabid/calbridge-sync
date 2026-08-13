@@ -253,6 +253,7 @@
     .inline-grid { display:grid; grid-template-columns:1fr 1fr; gap:2px; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
     .small-checkbox { display:flex; align-items:center; gap:10px; font-size:13px; color:var(--ink); padding:11px 13px; background:var(--surface); cursor:pointer; }
     .small-checkbox:hover { background:var(--surface-2); }
+    .small-checkbox.is-disabled { cursor:not-allowed; opacity:.55; background:var(--surface-2); }
     .small-checkbox input { width:auto; accent-color:var(--accent); width:16px; height:16px; }
     .rsvp-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
     .rsvp-grid .small-checkbox { border:1px solid var(--line-2); border-radius:var(--radius-sm); background:var(--surface); font-size:12.5px; }
@@ -732,7 +733,7 @@
         <div class="modal-subsection">
           <h3>Event Copy Settings</h3>
           <div class="inline-grid">
-            <label class="small-checkbox"><input type="checkbox" id="syncEventTitles" checked> Sync event titles</label>
+            <label class="small-checkbox" id="syncEventTitlesOption"><input type="checkbox" id="syncEventTitles" checked> Sync event titles</label>
             <label class="small-checkbox"><input type="checkbox" id="syncEventDescription" checked> Sync event description</label>
             <label class="small-checkbox"><input type="checkbox" id="syncEventLocation" checked> Sync event location</label>
             <label class="small-checkbox"><input type="checkbox" id="syncMeetingLinks" checked> Sync meeting links</label>
@@ -743,9 +744,9 @@
         </div>
 
         <div class="form-group" style="margin-top:18px;">
-          <label for="eventIdentifier">Event Identifier (optional)</label>
-          <input type="text" id="eventIdentifier" maxlength="120" placeholder="(Team Calendar)">
-          <small>Static text appended to destination event description</small>
+          <label for="eventIdentifier">Destination Event Title / Identifier (optional)</label>
+          <input type="text" id="eventIdentifier" maxlength="64" placeholder="(Solvaa)">
+          <small>If set, this exact text replaces the source event title on destination events. It is never added to the description.</small>
         </div>
 
         <div class="modal-subsection">
@@ -1008,6 +1009,21 @@
       container.insertBefore(tag, input);
     }
 
+    function updateEventIdentifierTitleState() {
+      const identifierInput = document.getElementById('eventIdentifier');
+      const titleCheckbox = document.getElementById('syncEventTitles');
+      const titleOption = document.getElementById('syncEventTitlesOption');
+      if (!identifierInput || !titleCheckbox) return;
+
+      const hasIdentifier = identifierInput.value.trim().length > 0;
+      titleCheckbox.disabled = hasIdentifier;
+      titleOption?.classList.toggle('is-disabled', hasIdentifier);
+      titleOption?.setAttribute(
+        'title',
+        hasIdentifier ? 'The destination title identifier overrides source title syncing.' : ''
+      );
+    }
+
     function setDefaultCopySettings() {
       document.getElementById('syncEventTitles').checked = true;
       document.getElementById('syncEventDescription').checked = true;
@@ -1017,6 +1033,7 @@
       document.getElementById('disableRemindersForClones').checked = false;
       document.getElementById('syncFreeEvents').checked = true;
       document.getElementById('eventIdentifier').value = '';
+      updateEventIdentifierTitleState();
       document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => { input.checked = defaultRsvpStatuses.includes(input.value); });
     }
 
@@ -1029,6 +1046,7 @@
       document.getElementById('disableRemindersForClones').checked = Boolean(sync.disableRemindersForClones);
       document.getElementById('syncFreeEvents').checked = sync.syncFreeEvents !== false;
       document.getElementById('eventIdentifier').value = sync.eventIdentifier || '';
+      updateEventIdentifierTitleState();
       const selectedStatuses = Array.isArray(sync.copyRsvpStatuses) && sync.copyRsvpStatuses.length > 0 ? sync.copyRsvpStatuses : defaultRsvpStatuses;
       document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => { input.checked = selectedStatuses.includes(input.value); });
     }
@@ -1533,6 +1551,8 @@
     }
 
     document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('eventIdentifier')?.addEventListener('input', updateEventIdentifierTitleState);
+      updateEventIdentifierTitleState();
       loadSystemHealth();
       loadAccounts();
       loadCalendars();
