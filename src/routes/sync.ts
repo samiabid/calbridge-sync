@@ -21,6 +21,7 @@ import {
   scanSyncOrphanClones,
 } from '../services/syncRepair';
 import { getProductionDiagnostics } from '../services/productionDiagnostics';
+import { normalizeGoogleEventColorId } from '../services/eventColors';
 import { buildSyncEventsRouter } from './syncEvents';
 
 const router = Router();
@@ -269,6 +270,7 @@ router.post('/', requireAuth, async (req, res) => {
       markEventPrivate,
       disableRemindersForClones,
       eventIdentifier,
+      cloneColorId,
       copyRsvpStatuses,
       syncFreeEvents,
     } = req.body;
@@ -303,6 +305,7 @@ router.post('/', requireAuth, async (req, res) => {
         typeof eventIdentifier === 'string' && eventIdentifier.trim().length > 0
           ? eventIdentifier.trim()
           : null,
+      cloneColorId: normalizeGoogleEventColorId(cloneColorId),
       copyRsvpStatuses: Array.isArray(copyRsvpStatuses) ? copyRsvpStatuses : [],
       syncFreeEvents: typeof syncFreeEvents === 'boolean' ? syncFreeEvents : true,
     });
@@ -389,6 +392,7 @@ router.patch('/:id/filters', requireAuth, async (req, res) => {
       markEventPrivate,
       disableRemindersForClones,
       eventIdentifier,
+      cloneColorId,
       copyRsvpStatuses,
       syncFreeEvents,
     } = req.body;
@@ -412,6 +416,8 @@ router.patch('/:id/filters', requireAuth, async (req, res) => {
               ? eventIdentifier.trim()
               : null
             : undefined,
+        cloneColorId:
+          cloneColorId === undefined ? undefined : normalizeGoogleEventColorId(cloneColorId),
         copyRsvpStatuses: Array.isArray(copyRsvpStatuses) ? copyRsvpStatuses : undefined,
         syncFreeEvents: typeof syncFreeEvents === 'boolean' ? syncFreeEvents : undefined,
       },

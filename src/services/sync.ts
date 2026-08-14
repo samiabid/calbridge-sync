@@ -39,6 +39,7 @@ interface SyncCopySettings {
   markEventPrivate: boolean;
   disableRemindersForClones: boolean;
   eventIdentifier: string | null;
+  cloneColorId: string | null;
   copyRsvpStatuses: string[];
   syncFreeEvents: boolean;
 }
@@ -62,6 +63,7 @@ interface CreateSyncParams {
   markEventPrivate: boolean;
   disableRemindersForClones: boolean;
   eventIdentifier: string | null;
+  cloneColorId: string | null;
   copyRsvpStatuses: string[];
   syncFreeEvents: boolean;
 }
@@ -375,6 +377,7 @@ export async function createSync(params: CreateSyncParams) {
     markEventPrivate,
     disableRemindersForClones,
     eventIdentifier,
+    cloneColorId,
     copyRsvpStatuses,
     syncFreeEvents,
   } = params;
@@ -459,6 +462,7 @@ export async function createSync(params: CreateSyncParams) {
         markEventPrivate,
         disableRemindersForClones,
         eventIdentifier,
+        cloneColorId,
         copyRsvpStatuses: normalizedRsvpStatuses,
         syncFreeEvents,
         lastSyncStatus: 'success',
@@ -826,6 +830,7 @@ export async function syncEvent(
       markEventPrivate: true,
       disableRemindersForClones: true,
       eventIdentifier: true,
+      cloneColorId: true,
       copyRsvpStatuses: true,
       syncFreeEvents: true,
     },
@@ -843,6 +848,7 @@ export async function syncEvent(
     markEventPrivate: syncRecord.markEventPrivate,
     disableRemindersForClones: syncRecord.disableRemindersForClones,
     eventIdentifier: syncRecord.eventIdentifier,
+    cloneColorId: syncRecord.cloneColorId,
     copyRsvpStatuses: normalizeRsvpStatuses(syncRecord.copyRsvpStatuses),
     syncFreeEvents: syncRecord.syncFreeEvents,
   };
@@ -1257,6 +1263,7 @@ async function createSyncedEvent(
         markEventPrivate: false,
         disableRemindersForClones: false,
         eventIdentifier: null,
+        cloneColorId: null,
         copyRsvpStatuses: [...ALLOWED_RSVP_STATUSES],
         syncFreeEvents: true,
       } as SyncCopySettings);

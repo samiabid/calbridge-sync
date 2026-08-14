@@ -25,6 +25,7 @@ Screenshots use fictional calendar names and example email addresses.
 - ✅ **Two-Way Sync**: Changes in either calendar automatically sync to the other
 - ✅ **Real-Time Updates**: Uses Google Calendar webhooks for instant synchronization
 - ✅ **Color Filtering**: Exclude events by color (e.g., ignore all "Lavender" colored events)
+- ✅ **Consistent Clone Colors**: Assign one Google Calendar event color to every clone in a sync, or preserve source colors
 - ✅ **Keyword Filtering**: Skip events containing specific keywords
 - ✅ **Calendar Selection**: Choose from primary or secondary Google calendars
 - ✅ **One-Way Mode**: Option to sync in only one direction
@@ -305,9 +306,10 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
    - New events only
    - Backfill recurring events from the last 2 months and all present/future events
 6. Configure event copy options (titles/description/location/meeting links/privacy/reminders/RSVP/free events)
-7. (Optional) Add keyword filters
-8. (Optional) Select colors to exclude
-9. Click "Create Sync"
+7. (Optional) Choose a consistent color for cloned events
+8. (Optional) Add keyword filters
+9. (Optional) Select colors to exclude
+10. Click "Create Sync"
 
 ### Filtering Examples
 

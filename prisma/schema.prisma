@@ -79,6 +79,7 @@ model Sync {
   markEventPrivate           Boolean  @default(false)
   disableRemindersForClones  Boolean  @default(false)
   eventIdentifier            String?
+  cloneColorId               String?
   copyRsvpStatuses           String[] @default([])
   syncFreeEvents             Boolean  @default(true)
 

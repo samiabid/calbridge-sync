@@ -30,3 +30,13 @@ test('event identifier control explains independent OneCal-style title behavior'
   assert.doesNotMatch(template, /updateEventIdentifierTitleState/);
   assert.doesNotMatch(template, /titleCheckbox\.disabled/);
 });
+
+test('dashboard exposes and submits the optional clone color setting', async () => {
+  const templatePath = path.join(process.cwd(), 'views', 'dashboard.ejs');
+  const template = await fs.readFile(templatePath, 'utf8');
+
+  assert.match(template, /id="cloneColorId"/);
+  assert.match(template, /Keep source event color/);
+  assert.match(template, /every clone created or updated by this sync uses this Google Calendar color/);
+  assert.match(template, /cloneColorId: document\.getElementById\('cloneColorId'\)\.value/);
+});

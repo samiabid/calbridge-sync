@@ -748,6 +748,25 @@
           <small>When event titles are synced, this text is appended to the source title. When titles are hidden, it becomes the destination title. It is never added to the description.</small>
         </div>
 
+        <div class="form-group" style="margin-top:18px;">
+          <label for="cloneColorId">Clone Event Color (optional)</label>
+          <select id="cloneColorId">
+            <option value="">Keep source event color</option>
+            <option value="1">Lavender</option>
+            <option value="2">Sage</option>
+            <option value="3">Grape</option>
+            <option value="4">Flamingo</option>
+            <option value="5">Banana</option>
+            <option value="6">Tangerine</option>
+            <option value="7">Peacock</option>
+            <option value="8">Graphite</option>
+            <option value="9">Blueberry</option>
+            <option value="10">Basil</option>
+            <option value="11">Tomato</option>
+          </select>
+          <small>If selected, every clone created or updated by this sync uses this Google Calendar color. Leave blank to preserve each source event&apos;s color.</small>
+        </div>
+
         <div class="modal-subsection">
           <h3>Copy events with RSVP</h3>
           <div class="rsvp-grid">
@@ -1017,6 +1036,7 @@
       document.getElementById('disableRemindersForClones').checked = false;
       document.getElementById('syncFreeEvents').checked = true;
       document.getElementById('eventIdentifier').value = '';
+      document.getElementById('cloneColorId').value = '';
       document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => { input.checked = defaultRsvpStatuses.includes(input.value); });
     }
 
@@ -1029,6 +1049,7 @@
       document.getElementById('disableRemindersForClones').checked = Boolean(sync.disableRemindersForClones);
       document.getElementById('syncFreeEvents').checked = sync.syncFreeEvents !== false;
       document.getElementById('eventIdentifier').value = sync.eventIdentifier || '';
+      document.getElementById('cloneColorId').value = sync.cloneColorId || '';
       const selectedStatuses = Array.isArray(sync.copyRsvpStatuses) && sync.copyRsvpStatuses.length > 0 ? sync.copyRsvpStatuses : defaultRsvpStatuses;
       document.querySelectorAll('input[name="copyRsvpStatus"]').forEach((input) => { input.checked = selectedStatuses.includes(input.value); });
     }
@@ -1130,6 +1151,7 @@
         markEventPrivate: document.getElementById('markEventPrivate').checked,
         disableRemindersForClones: document.getElementById('disableRemindersForClones').checked,
         eventIdentifier: document.getElementById('eventIdentifier').value.trim(),
+        cloneColorId: document.getElementById('cloneColorId').value,
         copyRsvpStatuses: getSelectedRsvpStatuses(),
         syncFreeEvents: document.getElementById('syncFreeEvents').checked,
       };

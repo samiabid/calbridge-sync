@@ -1,4 +1,5 @@
 import { getEventMeetingLink } from './syncLogic';
+import { normalizeGoogleEventColorId } from './eventColors';
 
 export interface TargetEventCopySettings {
   syncEventTitles: boolean;
@@ -8,6 +9,7 @@ export interface TargetEventCopySettings {
   markEventPrivate: boolean;
   disableRemindersForClones: boolean;
   eventIdentifier: string | null;
+  cloneColorId: string | null;
 }
 
 export function normalizeEventIdentifier(
@@ -66,7 +68,7 @@ export function buildTargetEventRequestBody(
     start: event.start,
     end: event.end,
     location: settings.syncEventLocation ? event.location : undefined,
-    colorId: event.colorId,
+    colorId: normalizeGoogleEventColorId(settings.cloneColorId) || event.colorId,
     visibility: settings.markEventPrivate ? 'private' : event.visibility,
     reminders: settings.disableRemindersForClones
       ? {

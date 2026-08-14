@@ -16,6 +16,7 @@ function settings(
     markEventPrivate: false,
     disableRemindersForClones: false,
     eventIdentifier: null,
+    cloneColorId: null,
     ...overrides,
   };
 }
@@ -145,4 +146,30 @@ test('target payload preserves event fields and sync metadata for create and upd
     syncId: 'sync-1',
     originalEventId: 'source-event-1',
   });
+});
+
+test('configured clone color overrides the source event color', () => {
+  const body = buildTargetEventRequestBody(
+    'sync-1',
+    { ...sourceEvent, colorId: '2' },
+    settings({ cloneColorId: '10' })
+  );
+
+  assert.equal(body.colorId, '10');
+});
+
+test('blank or invalid clone colors preserve the source event color', () => {
+  const blankColor = buildTargetEventRequestBody(
+    'sync-1',
+    { ...sourceEvent, colorId: '2' },
+    settings({ cloneColorId: '  ' })
+  );
+  const invalidColor = buildTargetEventRequestBody(
+    'sync-1',
+    { ...sourceEvent, colorId: '2' },
+    settings({ cloneColorId: '99' })
+  );
+
+  assert.equal(blankColor.colorId, '2');
+  assert.equal(invalidColor.colorId, '2');
 });

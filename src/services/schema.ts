@@ -35,6 +35,9 @@ export async function ensureSyncColumns() {
       'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "eventIdentifier" TEXT'
     );
     await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "cloneColorId" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
       'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "copyRsvpStatuses" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]'
     );
     await prisma.$executeRawUnsafe(
