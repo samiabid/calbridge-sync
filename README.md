@@ -30,7 +30,7 @@ Screenshots use fictional calendar names and example email addresses.
 - ✅ **One-Way Mode**: Option to sync in only one direction
 - ✅ **Initial Sync Scope Control**: Choose new events only, or backfill recurring events from the last 2 months plus all present/future events
 - ✅ **Event Copy Controls**: Toggle titles, description, location, meeting links, reminders, privacy, RSVP states, and free/busy behavior
-- ✅ **Destination Title Identifier**: Replace cloned event titles with one exact configured label without changing descriptions
+- ✅ **Event Title Identifier**: Append static text to copied titles or use it as a custom title when source titles are hidden
 - ✅ **Backfill Re-Run Action**: Safely rerun missed backfill from the dashboard
 - ✅ **Event-Level Dashboard**: Inspect live source events, statuses, failures, skips, and force-sync individual events
 - ✅ **Read-Only Production Diagnostics**: Detect duplicate mappings, webhook gaps, open failures, and disconnected accounts without cleanup side effects
@@ -408,7 +408,7 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
 ### Known Issues and Field Fixes (March 2026)
 
 - Event identifier appears in the destination description instead of the event title.
-  - Fix: current versions treat a non-blank identifier as the exact destination title, regardless of the title-copy setting, and never add it to the description. Existing clones update on their next source change, backfill, or force-sync.
+  - Fix: current versions append a non-blank identifier to copied source titles, or use it as the custom destination title when title copying is disabled; identifiers are never added to descriptions. Existing clones update on their next source change, backfill, or force-sync.
 
 - Edit modal shows wrong source account (for example, `[freeBusyReader]`) even after re-auth.
   - Cause: the same calendar can appear under multiple connected accounts, and older UI selection matched only by `calendarId`.

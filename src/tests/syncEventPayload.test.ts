@@ -33,14 +33,14 @@ const sourceEvent = {
   end: { dateTime: '2026-08-14T11:00:00Z' },
 };
 
-test('identifier exactly replaces a copied source title and never enters the description', () => {
+test('identifier is appended to a copied source title and never enters the description', () => {
   const body = buildTargetEventRequestBody(
     'sync-1',
     sourceEvent,
     settings({ eventIdentifier: '  (Solvaa)  ' })
   );
 
-  assert.equal(body.summary, '(Solvaa)');
+  assert.equal(body.summary, 'Client Strategy Meeting (Solvaa)');
   assert.equal(
     body.description,
     'Review the launch plan.\n\nMeeting Link: https://meet.google.com/abc-defg-hij'
@@ -48,7 +48,7 @@ test('identifier exactly replaces a copied source title and never enters the des
   assert.doesNotMatch(body.description || '', /Solvaa/);
 });
 
-test('identifier replaces the title even when source title syncing is disabled', () => {
+test('identifier becomes the custom title when source title syncing is disabled', () => {
   const body = buildTargetEventRequestBody(
     'sync-1',
     sourceEvent,
@@ -58,7 +58,35 @@ test('identifier replaces the title even when source title syncing is disabled',
   assert.equal(body.summary, '(Solvaa)');
 });
 
-test('source description and meeting link settings remain independent of the identifier', () => {
+test('all four title and identifier combinations have stable behavior', () => {
+  const titleAndIdentifier = buildTargetEventRequestBody(
+    'sync-1',
+    sourceEvent,
+    settings({ syncEventTitles: true, eventIdentifier: '(Solvaa)' })
+  );
+  const titleOnly = buildTargetEventRequestBody(
+    'sync-1',
+    sourceEvent,
+    settings({ syncEventTitles: true, eventIdentifier: null })
+  );
+  const identifierOnly = buildTargetEventRequestBody(
+    'sync-1',
+    sourceEvent,
+    settings({ syncEventTitles: false, eventIdentifier: '(Solvaa)' })
+  );
+  const busyOnly = buildTargetEventRequestBody(
+    'sync-1',
+    sourceEvent,
+    settings({ syncEventTitles: false, eventIdentifier: null })
+  );
+
+  assert.equal(titleAndIdentifier.summary, 'Client Strategy Meeting (Solvaa)');
+  assert.equal(titleOnly.summary, 'Client Strategy Meeting');
+  assert.equal(identifierOnly.summary, '(Solvaa)');
+  assert.equal(busyOnly.summary, 'Busy');
+});
+
+test('description, meeting link, and location settings remain independent of the identifier', () => {
   const body = buildTargetEventRequestBody(
     'sync-1',
     sourceEvent,
@@ -89,10 +117,16 @@ test('blank identifiers preserve source-title and Busy fallback behavior', () =>
     { ...sourceEvent, summary: '  ' },
     settings({ eventIdentifier: null })
   );
+  const missingTitleWithIdentifier = buildTargetEventRequestBody(
+    'sync-1',
+    { ...sourceEvent, summary: '  ' },
+    settings({ eventIdentifier: '(Solvaa)' })
+  );
 
   assert.equal(copiedTitle.summary, 'Client Strategy Meeting');
   assert.equal(hiddenTitle.summary, 'Busy');
   assert.equal(missingTitle.summary, 'Busy');
+  assert.equal(missingTitleWithIdentifier.summary, 'Busy (Solvaa)');
 });
 
 test('target payload preserves event fields and sync metadata for create and update paths', () => {

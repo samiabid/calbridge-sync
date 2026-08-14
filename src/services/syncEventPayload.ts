@@ -57,7 +57,11 @@ export function buildTargetEventRequestBody(
       : 'Busy';
 
   return {
-    summary: eventIdentifier || (settings.syncEventTitles ? sourceSummary : 'Busy'),
+    summary: settings.syncEventTitles
+      ? eventIdentifier
+        ? `${sourceSummary} ${eventIdentifier}`
+        : sourceSummary
+      : eventIdentifier || 'Busy',
     description: getTargetEventDescription(event, settings),
     start: event.start,
     end: event.end,

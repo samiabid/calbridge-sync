@@ -16,17 +16,17 @@ test('dashboard template includes the event-level sync dashboard controls', asyn
   assert.match(template, /not_synced/i);
 });
 
-test('event identifier control explains and enforces destination-title precedence', async () => {
+test('event identifier control explains independent OneCal-style title behavior', async () => {
   const templatePath = path.join(process.cwd(), 'views', 'dashboard.ejs');
   const template = await fs.readFile(templatePath, 'utf8');
 
-  assert.match(template, /Destination Event Title \/ Identifier \(optional\)/);
+  assert.match(template, /Event Title Identifier \/ Custom Title \(optional\)/);
   assert.match(
     template,
-    /If set, this exact text replaces the source event title on destination events\. It is never added to the description\./
+    /When event titles are synced, this text is appended to the source title\. When titles are hidden, it becomes the destination title\. It is never added to the description\./
   );
   assert.match(template, /id="eventIdentifier" maxlength="64"/);
-  assert.match(template, /id="syncEventTitlesOption"/);
-  assert.match(template, /titleCheckbox\.disabled = hasIdentifier/);
-  assert.match(template, /addEventListener\('input', updateEventIdentifierTitleState\)/);
+  assert.doesNotMatch(template, /id="syncEventTitlesOption"/);
+  assert.doesNotMatch(template, /updateEventIdentifierTitleState/);
+  assert.doesNotMatch(template, /titleCheckbox\.disabled/);
 });
