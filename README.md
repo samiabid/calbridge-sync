@@ -32,7 +32,8 @@ Screenshots use fictional calendar names and example email addresses.
 - ✅ **Initial Sync Scope Control**: Choose new events only, or backfill recurring events from the last 2 months plus all present/future events
 - ✅ **Event Copy Controls**: Toggle titles, description, location, meeting links, reminders, privacy, RSVP states, and free/busy behavior
 - ✅ **Event Title Identifier**: Append static text to copied titles or use it as a custom title when source titles are hidden
-- ✅ **Backfill Re-Run Action**: Safely rerun missed backfill from the dashboard
+- ✅ **Safe Two-Way Backfills**: Two-way runs scan both calendars sequentially, with persisted run state and concurrent-run protection
+- ✅ **Invite Deduplication**: Matching native Google invites are skipped by `iCalUID` and recurring occurrence instead of cloned twice
 - ✅ **Event-Level Dashboard**: Inspect live source events, statuses, failures, skips, and force-sync individual events
 - ✅ **Read-Only Production Diagnostics**: Detect duplicate mappings, webhook gaps, open failures, and disconnected accounts without cleanup side effects
 - ✅ **Rate Limit Resilience**: Automatic retry/backoff for Google API 429/quota-style responses
@@ -328,7 +329,8 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
 3. **Smart Sync**: Only syncs events that pass your filters
 4. **Loop Prevention**: Events created by sync are marked to prevent infinite loops
 5. **Two-Way**: If enabled, changes flow in both directions
-6. **Safe Recovery**: You can manually rerun missed backfill without recreating the sync
+6. **Safe Recovery**: You can manually rerun missed backfill without recreating the sync. Two-way runs process both directions, while one-way runs retain source-to-target behavior.
+7. **Native Invite Safety**: Before creating an unmapped clone, the app checks for the same Google `iCalUID` on the destination. Recurring events also require the same original occurrence time. Native events are never adopted, updated, mapped, or deleted by this check.
 
 ## Architecture
 

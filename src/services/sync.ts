@@ -1,4 +1,3 @@
-import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
 import { getAuthenticatedCalendar } from './calendar';
 import { setupWebhook, stopWebhook } from './webhook';
@@ -16,20 +15,62 @@ import {
   ALLOWED_RSVP_STATUSES,
   eventHasAnyCopyableDetails,
   getEventSelfResponseStatus,
+  getRecurringSeriesIdFromEventId,
   isDetailPlaceholderSummary,
   needsReadableSourceDetails,
   normalizeRsvpStatuses,
+  shouldAttemptAccountDetection,
   shouldSkipEvent,
 } from './syncLogic';
 import { buildTargetEventRequestBody } from './syncEventPayload';
+import { prisma } from './prisma';
+import {
+  buildNativeOccurrenceIndex,
+  getCalendarEventOccurrenceIdentity,
+  isDuplicateCalendarOccurrence,
+} from './calendarEventIdentity';
+import {
+  buildDestinationAccountUpdate,
+  buildBackfillDirectionContexts,
+  type BackfillDirectionContext,
+} from './backfillLogic';
 
-const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
 const INITIAL_SYNC_PAST_MONTHS = 2;
 const BACKFILL_PER_EVENT_DELAY_MS = 200;
+const BACKFILL_STALE_AFTER_MS = 2 * 60 * 60 * 1000;
 type RsvpStatus = (typeof ALLOWED_RSVP_STATUSES)[number];
 
 export type SyncStartMode = 'new_only' | 'past_3mo_recurring';
+
+export interface SyncEventOutcome {
+  status: 'synced' | 'skipped' | 'duplicate';
+  reasonCode?: string;
+  reasonMessage?: string;
+  targetEventId?: string;
+}
+
+interface SyncEventOptions {
+  destinationOccurrenceKeys?: ReadonlySet<string>;
+}
+
+export interface BackfillDirectionSummary {
+  direction: SyncDirection;
+  scanned: number;
+  synced: number;
+  skipped: number;
+  duplicate: number;
+  failed: number;
+  skippedWindow: number;
+  error: string | null;
+}
+
+export interface BackfillRunSummary {
+  syncId: string;
+  status: 'success' | 'partial' | 'failed';
+  directions: BackfillDirectionSummary[];
+  aggregate: Omit<BackfillDirectionSummary, 'direction' | 'error'>;
+}
 
 interface SyncCopySettings {
   syncEventTitles: boolean;
@@ -309,30 +350,113 @@ async function assertCalendarAccess(
   }
 }
 
-function startInitialBackfillInBackground(
+function createBackfillAlreadyRunningError(): Error & { code: string } {
+  const error = new Error('A backfill is already running for this sync.') as Error & { code: string };
+  error.code = 'BACKFILL_ALREADY_RUNNING';
+  return error;
+}
+
+async function acquireBackfillRun(syncId: string, userId: string) {
+  const runId = crypto.randomUUID();
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - BACKFILL_STALE_AFTER_MS);
+  const acquired = await prisma.sync.updateMany({
+    where: {
+      id: syncId,
+      userId,
+      isActive: true,
+      OR: [
+        { backfillStatus: { not: 'running' } },
+        { backfillStartedAt: null },
+        { backfillStartedAt: { lt: staleBefore } },
+      ],
+    },
+    data: {
+      backfillRunId: runId,
+      backfillStatus: 'running',
+      backfillStartedAt: now,
+      backfillCompletedAt: null,
+      backfillLastError: null,
+    },
+  });
+
+  if (acquired.count > 0) return { runId, startedAt: now };
+
+  const sync = await prisma.sync.findFirst({
+    where: { id: syncId, userId },
+    select: { isActive: true, backfillStatus: true, backfillStartedAt: true },
+  });
+  if (!sync) throw new Error('Sync not found');
+  if (!sync.isActive) throw new Error('Sync is paused. Resume it before re-running backfill.');
+  throw createBackfillAlreadyRunningError();
+}
+
+async function completeBackfillRun(
+  syncId: string,
+  runId: string,
+  summary: BackfillRunSummary
+) {
+  const errors = summary.directions
+    .map((item) => item.error)
+    .filter((item): item is string => Boolean(item));
+  await prisma.sync.updateMany({
+    where: { id: syncId, backfillRunId: runId },
+    data: {
+      backfillStatus: summary.status,
+      backfillCompletedAt: new Date(),
+      backfillLastError: errors.length > 0 ? errors.join(' | ').slice(0, 1000) : null,
+    },
+  });
+}
+
+async function failBackfillRun(syncId: string, runId: string, message: string) {
+  await prisma.sync.updateMany({
+    where: { id: syncId, backfillRunId: runId },
+    data: {
+      backfillStatus: 'failed',
+      backfillCompletedAt: new Date(),
+      backfillLastError: message.slice(0, 1000),
+    },
+  });
+}
+
+async function startInitialBackfillInBackground(
   syncId: string,
   userId: string,
   sourceAccountId: string,
   targetAccountId: string
 ) {
+  const { runId, startedAt } = await acquireBackfillRun(syncId, userId);
   logInfo('initial_backfill_started', {
     syncId,
+    runId,
+    startedAt: startedAt.toISOString(),
     sourceAccountId,
     targetAccountId,
   });
   void (async () => {
     try {
-      await performInitialSync(
+      const summary = await performInitialSync(
         syncId,
         userId,
         sourceAccountId,
         targetAccountId,
         'past_3mo_recurring'
       );
+      await completeBackfillRun(syncId, runId, summary);
+      logInfo('initial_backfill_run_completed', {
+        syncId,
+        runId,
+        status: summary.status,
+        directions: JSON.stringify(summary.directions),
+        aggregate: JSON.stringify(summary.aggregate),
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await failBackfillRun(syncId, runId, message);
       logError('initial_backfill_failed', {
         syncId,
+        runId,
         error: message,
       });
       await sendAlert({
@@ -355,6 +479,8 @@ function startInitialBackfillInBackground(
       );
     }
   })();
+
+  return { runId, status: 'running' as const, startedAt };
 }
 
 export async function createSync(params: CreateSyncParams) {
@@ -527,9 +653,9 @@ export async function createSync(params: CreateSyncParams) {
   // Optional initial sync based on setup choice.
   // Run this in the background so sync creation request can return quickly.
   if (syncStartMode === 'past_3mo_recurring') {
-    startInitialBackfillInBackground(sync.id, userId, sourceAccountId, targetAccountId);
+    await startInitialBackfillInBackground(sync.id, userId, sourceAccountId, targetAccountId);
   } else {
-    console.log(`Skipping initial backfill for sync ${sync.id} (new events only mode)`);
+    logInfo('initial_backfill_skipped', { syncId: sync.id, reason: 'new_events_only_mode' });
   }
 
   return sync;
@@ -567,9 +693,13 @@ export async function rerunMissedBackfill(syncId: string, userId: string) {
     throw new Error('Sync is paused. Resume it before re-running backfill.');
   }
 
+  // A manual backfill re-run is an explicit fresh start; let account
+  // detection retry too.
+  await updateSyncIfExists(sync.id, { accountDetectionAttempts: 0 });
+
   const sourceAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
   const targetAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
-  startInitialBackfillInBackground(sync.id, userId, sourceAccountId, targetAccountId);
+  return startInitialBackfillInBackground(sync.id, userId, sourceAccountId, targetAccountId);
 }
 
 export async function deleteSync(
@@ -603,7 +733,10 @@ export async function deleteSync(
       );
     }
   } catch (error) {
-    console.error('Error stopping webhooks:', error);
+    logError('webhook_stop_failed', {
+      syncId: sync.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
   // Delete synced events from calendar if requested
@@ -628,18 +761,28 @@ export async function deleteSync(
           `deleting synced event ${syncedEvent.targetEventId} while removing sync ${sync.id}`
         );
 
-        console.log(`Deleted synced event ${syncedEvent.targetEventId} from target calendar ${sync.targetCalendarId}`);
+        logInfo('synced_event_deleted', {
+          syncId: sync.id,
+          targetEventId: syncedEvent.targetEventId,
+          targetCalendarId: sync.targetCalendarId,
+        });
       } catch (error: any) {
         if (error.code !== 404) {
-          console.error(`Error deleting event from target calendar:`, error);
+          logError('synced_event_delete_failed', {
+            syncId: sync.id,
+            targetEventId: syncedEvent.targetEventId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       }
     }
 
     if (skippedNonDestinationEvents > 0) {
-      console.log(
-        `Skipped ${skippedNonDestinationEvents} synced mappings outside destination calendar ${sync.targetCalendarId} during deleteSync(${sync.id})`
-      );
+      logInfo('delete_sync_skipped_non_destination_mappings', {
+        syncId: sync.id,
+        targetCalendarId: sync.targetCalendarId,
+        skippedCount: skippedNonDestinationEvents,
+      });
     }
   }
 
@@ -655,17 +798,30 @@ export async function performInitialSync(
   syncStartMode: SyncStartMode = 'past_3mo_recurring'
 ) {
   if (syncStartMode === 'new_only') {
-    console.log(`Initial sync skipped for sync ${syncId} (new events only mode)`);
-    return;
+    logInfo('initial_sync_skipped', { syncId, reason: 'new_events_only_mode' });
+    return {
+      syncId,
+      status: 'success',
+      directions: [],
+      aggregate: {
+        scanned: 0,
+        synced: 0,
+        skipped: 0,
+        duplicate: 0,
+        failed: 0,
+        skippedWindow: 0,
+      },
+    } satisfies BackfillRunSummary;
   }
 
   const sync = await prisma.sync.findUnique({ where: { id: syncId } });
   if (!sync) throw new Error('Sync not found');
 
-  const sourceAccountId = sourceGoogleAccountId || sync.sourceGoogleAccountId || sync.googleAccountId;
-  const targetAccountId = targetGoogleAccountId || sync.targetGoogleAccountId || sync.googleAccountId;
-
-  const sourceCalendar = await getAuthenticatedCalendar(userId, sourceAccountId);
+  const directionContexts = buildBackfillDirectionContexts({
+    ...sync,
+    sourceGoogleAccountId: sourceGoogleAccountId || sync.sourceGoogleAccountId,
+    targetGoogleAccountId: targetGoogleAccountId || sync.targetGoogleAccountId,
+  });
   await updateSyncIfExists(
     syncId,
     {
@@ -679,84 +835,189 @@ export async function performInitialSync(
   historyStart.setMonth(historyStart.getMonth() - INITIAL_SYNC_PAST_MONTHS);
   const futureWindowEnd = getSyncFutureWindowEnd(now);
   const futureWindowDays = normalizeSyncFutureDays(process.env.SYNC_FUTURE_DAYS);
-  const rsvpStatuses = normalizeRsvpStatuses(sync.copyRsvpStatuses);
+  const directions: BackfillDirectionSummary[] = [];
 
+  for (const context of directionContexts) {
+    try {
+      const summary = await performBackfillDirection(
+        syncId,
+        userId,
+        context,
+        now,
+        historyStart,
+        futureWindowEnd
+      );
+      directions.push(summary);
+      logInfo('initial_sync_direction_completed', {
+        syncId,
+        mode: syncStartMode,
+        historyMonths: INITIAL_SYNC_PAST_MONTHS,
+        futureDays: futureWindowDays,
+        ...summary,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const summary: BackfillDirectionSummary = {
+        direction: context.direction,
+        scanned: 0,
+        synced: 0,
+        skipped: 0,
+        duplicate: 0,
+        failed: 1,
+        skippedWindow: 0,
+        error: message,
+      };
+      directions.push(summary);
+      logError('initial_sync_direction_failed', { syncId, ...summary });
+    }
+  }
+
+  const aggregate = directions.reduce(
+    (total, item) => ({
+      scanned: total.scanned + item.scanned,
+      synced: total.synced + item.synced,
+      skipped: total.skipped + item.skipped,
+      duplicate: total.duplicate + item.duplicate,
+      failed: total.failed + item.failed,
+      skippedWindow: total.skippedWindow + item.skippedWindow,
+    }),
+    { scanned: 0, synced: 0, skipped: 0, duplicate: 0, failed: 0, skippedWindow: 0 }
+  );
+  const fatallyFailedDirections = directions.filter(
+    (item) =>
+      item.error &&
+      item.scanned === 0 &&
+      item.synced === 0 &&
+      item.skipped === 0 &&
+      item.duplicate === 0
+  ).length;
+  const status: BackfillRunSummary['status'] =
+    fatallyFailedDirections === directions.length
+      ? 'failed'
+      : fatallyFailedDirections > 0 || aggregate.failed > 0
+        ? 'partial'
+        : 'success';
+  const result: BackfillRunSummary = { syncId, status, directions, aggregate };
+
+  logInfo('initial_sync_completed', {
+    syncId,
+    status,
+    mode: syncStartMode,
+    historyMonths: INITIAL_SYNC_PAST_MONTHS,
+    futureDays: futureWindowDays,
+    directions: JSON.stringify(directions),
+    aggregate: JSON.stringify(aggregate),
+  });
+  return result;
+}
+
+async function listEventsForBackfill(
+  calendar: Awaited<ReturnType<typeof getAuthenticatedCalendar>>,
+  calendarId: string,
+  timeMin: Date,
+  timeMax: Date,
+  context: string
+) {
+  const events: any[] = [];
   let pageToken: string | undefined;
-  let scannedCount = 0;
-  let syncedCount = 0;
-  let skippedByWindowCount = 0;
-  let skippedByFilterCount = 0;
-  let errorCount = 0;
-
-  // Backfill from 2 months ago through a bounded future window.
-  // Unbounded recurring expansion can produce decades of instances and exhaust Google quota.
   do {
     const response = await withRateLimitRetry(
       () =>
-        sourceCalendar.events.list({
-          calendarId: sync.sourceCalendarId,
-          timeMin: historyStart.toISOString(),
-          timeMax: futureWindowEnd.toISOString(),
+        calendar.events.list({
+          calendarId,
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
           maxResults: 250,
           singleEvents: true,
           orderBy: 'startTime',
+          showDeleted: false,
           pageToken,
         }),
-      `listing initial backfill events for sync ${syncId}`
+      context
     );
-
-    const events = response.data.items || [];
-
-    for (const event of events) {
-      if (!event.id) continue;
-      scannedCount += 1;
-
-      if (shouldSkipInitialBackfillEvent(event, now)) {
-        skippedByWindowCount += 1;
-        continue;
-      }
-
-      // Check filters
-      if (
-        shouldSkipEvent(
-          event,
-          sync.excludedColors,
-          sync.excludedKeywords,
-          sync.syncFreeEvents,
-          rsvpStatuses
-        )
-      ) {
-        skippedByFilterCount += 1;
-        continue;
-      }
-
-      try {
-        await syncEvent(
-          syncId,
-          userId,
-          event,
-          sync.sourceCalendarId,
-          sync.targetCalendarId,
-          targetAccountId,
-          false,
-          sourceAccountId
-        );
-        syncedCount += 1;
-        if (BACKFILL_PER_EVENT_DELAY_MS > 0) {
-          await sleepMs(BACKFILL_PER_EVENT_DELAY_MS);
-        }
-      } catch (error) {
-        errorCount += 1;
-        console.error(`Error syncing event ${event.id}:`, error);
-      }
-    }
-
+    events.push(...(response.data.items || []));
     pageToken = response.data.nextPageToken || undefined;
   } while (pageToken);
+  return events;
+}
 
-  console.log(
-    `Initial sync completed for sync ${syncId}: scanned=${scannedCount}, synced=${syncedCount}, skippedWindow=${skippedByWindowCount}, skippedFilters=${skippedByFilterCount}, errors=${errorCount}, mode=${syncStartMode}, historyMonths=${INITIAL_SYNC_PAST_MONTHS}, futureDays=${futureWindowDays}`
+async function performBackfillDirection(
+  syncId: string,
+  userId: string,
+  context: BackfillDirectionContext,
+  now: Date,
+  historyStart: Date,
+  futureWindowEnd: Date
+): Promise<BackfillDirectionSummary> {
+  const [sourceCalendar, targetCalendar] = await Promise.all([
+    getAuthenticatedCalendar(userId, context.sourceGoogleAccountId),
+    getAuthenticatedCalendar(userId, context.targetGoogleAccountId),
+  ]);
+  const destinationEvents = await listEventsForBackfill(
+    targetCalendar,
+    context.targetCalendarId,
+    historyStart,
+    futureWindowEnd,
+    `preloading destination events for ${context.direction} backfill on sync ${syncId}`
   );
+  const destinationOccurrenceKeys = buildNativeOccurrenceIndex(destinationEvents);
+  const sourceEvents = await listEventsForBackfill(
+    sourceCalendar,
+    context.sourceCalendarId,
+    historyStart,
+    futureWindowEnd,
+    `listing ${context.direction} backfill events for sync ${syncId}`
+  );
+  const summary: BackfillDirectionSummary = {
+    direction: context.direction,
+    scanned: 0,
+    synced: 0,
+    skipped: 0,
+    duplicate: 0,
+    failed: 0,
+    skippedWindow: 0,
+    error: null,
+  };
+
+  for (const event of sourceEvents) {
+    if (!event.id) continue;
+    summary.scanned += 1;
+    if (shouldSkipInitialBackfillEvent(event, now)) {
+      summary.skippedWindow += 1;
+      summary.skipped += 1;
+      continue;
+    }
+
+    try {
+      const outcome = await syncEvent(
+        syncId,
+        userId,
+        event,
+        context.sourceCalendarId,
+        context.targetCalendarId,
+        context.targetGoogleAccountId,
+        false,
+        context.sourceGoogleAccountId,
+        context.direction,
+        { destinationOccurrenceKeys }
+      );
+      summary[outcome.status] += 1;
+      if (outcome.status === 'synced' && BACKFILL_PER_EVENT_DELAY_MS > 0) {
+        await sleepMs(BACKFILL_PER_EVENT_DELAY_MS);
+      }
+    } catch (error) {
+      summary.failed += 1;
+      summary.error = error instanceof Error ? error.message : String(error);
+      logError('initial_sync_event_failed', {
+        syncId,
+        direction: context.direction,
+        eventId: event.id,
+        error: summary.error,
+      });
+    }
+  }
+
+  return summary;
 }
 
 function getEventStartDate(event: any): Date | null {
@@ -802,6 +1063,57 @@ function shouldSkipInitialBackfillEvent(event: any, now: Date): boolean {
   return true;
 }
 
+async function hasNativeDestinationDuplicate(
+  calendar: Awaited<ReturnType<typeof getAuthenticatedCalendar>>,
+  targetCalendarId: string,
+  event: any,
+  destinationOccurrenceKeys?: ReadonlySet<string>
+): Promise<boolean> {
+  const identity = getCalendarEventOccurrenceIdentity(event);
+  if (!identity) return false;
+  if (destinationOccurrenceKeys) {
+    return isDuplicateCalendarOccurrence(event, destinationOccurrenceKeys);
+  }
+
+  const rawOccurrenceStart =
+    event?.originalStartTime?.dateTime ||
+    event?.originalStartTime?.date ||
+    event?.start?.dateTime ||
+    event?.start?.date;
+  const occurrenceStart = rawOccurrenceStart ? new Date(rawOccurrenceStart) : null;
+  const hasOccurrenceWindow =
+    identity.occurrence !== null && occurrenceStart && !Number.isNaN(occurrenceStart.getTime());
+  const timeMin = hasOccurrenceWindow
+    ? new Date(occurrenceStart.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString()
+    : undefined;
+  const timeMax = hasOccurrenceWindow
+    ? new Date(occurrenceStart.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString()
+    : undefined;
+  let pageToken: string | undefined;
+
+  do {
+    const response = await withRateLimitRetry(
+      () =>
+        calendar.events.list({
+          calendarId: targetCalendarId,
+          iCalUID: identity.iCalUID,
+          singleEvents: true,
+          showDeleted: false,
+          maxResults: 250,
+          timeMin,
+          timeMax,
+          pageToken,
+        }),
+      `checking destination invite identity for event ${event.id || identity.iCalUID}`
+    );
+    const nativeKeys = buildNativeOccurrenceIndex(response.data.items || []);
+    if (nativeKeys.has(identity.key)) return true;
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+
+  return false;
+}
+
 export async function syncEvent(
   syncId: string,
   userId: string,
@@ -811,8 +1123,9 @@ export async function syncEvent(
   targetGoogleAccountId?: string,
   hasRetriedWithAutoDetection: boolean = false,
   sourceGoogleAccountId?: string,
-  direction: SyncDirection = 'source_to_target'
-) {
+  direction: SyncDirection = 'source_to_target',
+  options: SyncEventOptions = {}
+): Promise<SyncEventOutcome> {
   let calendar: Awaited<ReturnType<typeof getAuthenticatedCalendar>> | null = null;
   let selectedAccountId = targetGoogleAccountId;
   const syncRecord = await prisma.sync.findUnique({
@@ -853,16 +1166,23 @@ export async function syncEvent(
     syncFreeEvents: syncRecord.syncFreeEvents,
   };
 
-  console.log(
-    `syncEvent called for sync ${syncId}: sourceGoogleAccountId=${sourceGoogleAccountId || 'null'}, targetGoogleAccountId=${targetGoogleAccountId || 'null'}, targetCalendar=${targetCalendarId}`
-  );
+  logInfo('sync_event_started', {
+    syncId,
+    sourceGoogleAccountId: sourceGoogleAccountId || null,
+    targetGoogleAccountId: targetGoogleAccountId || null,
+    targetCalendarId,
+  });
 
   // If targetGoogleAccountId is not provided (old syncs), try to find the account that has access
   // But limit attempts to prevent excessive API calls
   if (!selectedAccountId) {
-    const MAX_DETECTION_ATTEMPTS = 3;
+    const detectionGate = shouldAttemptAccountDetection(
+      syncRecord.accountDetectionAttempts,
+      (syncRecord as any).lastAccountDetectionAt || null,
+      new Date()
+    );
 
-    if (syncRecord.accountDetectionAttempts < MAX_DETECTION_ATTEMPTS) {
+    if (detectionGate.attempt) {
       const accounts = await prisma.googleAccount.findMany({
         where: { userId },
         orderBy: { isPrimary: 'desc' }, // Try primary first
@@ -886,29 +1206,47 @@ export async function syncEvent(
           await updateSyncIfExists(
             syncId,
             {
-              targetGoogleAccountId: account.id,
+              ...buildDestinationAccountUpdate(direction, account.id),
               accountDetectionAttempts: 0,
+              lastAccountDetectionAt: new Date(),
             },
             true
           );
 
-          console.log(`✓ Found working account ${account.displayName} for target calendar ${targetCalendarId}`);
+          logInfo('account_detection_succeeded', {
+            syncId,
+            accountDisplayName: account.displayName,
+            targetCalendarId,
+          });
           break;
         } catch (error: any) {
           // This account doesn't have access, try next
-          console.log(`✗ Account ${account.displayName} cannot access target calendar: ${error.message}`);
+          logInfo('account_detection_candidate_rejected', {
+            syncId,
+            accountDisplayName: account.displayName,
+            targetCalendarId,
+            error: error.message,
+          });
           continue;
         }
       }
 
-      // Increment attempt counter if we didn't find an account
+      // Record the failed attempt. After the cooldown re-opens the gate the
+      // counter restarts at 1; otherwise use an atomic increment so
+      // concurrent webhook runs don't clobber each other with stale reads.
       if (!selectedAccountId) {
-        console.log(
-          `⚠ No working account found after ${syncRecord.accountDetectionAttempts || 0} attempts for sync ${syncId}`
-        );
+        logWarn('account_detection_failed', {
+          syncId,
+          attempts: syncRecord.accountDetectionAttempts || 0,
+        });
         await updateSyncIfExists(
           syncId,
-          { accountDetectionAttempts: (syncRecord.accountDetectionAttempts || 0) + 1 },
+          detectionGate.isCooldownRetry
+            ? { accountDetectionAttempts: 1, lastAccountDetectionAt: new Date() }
+            : {
+                accountDetectionAttempts: { increment: 1 },
+                lastAccountDetectionAt: new Date(),
+              },
           true
         );
       }
@@ -916,11 +1254,11 @@ export async function syncEvent(
 
     // If we still don't have a calendar, use primary account
     if (!calendar) {
-      console.log(`⚠ Using fallback primary account for sync ${syncId}`);
+      logWarn('account_detection_using_primary_fallback', { syncId });
       calendar = await getAuthenticatedCalendar(userId, undefined);
     }
   } else {
-    console.log(`Using pre-configured account ${selectedAccountId} for sync ${syncId}`);
+    logInfo('sync_event_using_configured_account', { syncId, accountId: selectedAccountId });
     calendar = await getAuthenticatedCalendar(userId, selectedAccountId);
   }
 
@@ -938,9 +1276,10 @@ export async function syncEvent(
   );
 
   if (needsReadableSourceDetails(copySettings) && !eventHasAnyCopyableDetails(event)) {
-    console.warn(
-      `Skipping source event ${event.id} for sync ${syncId}: no readable details available after hydration.`
-    );
+    logWarn('sync_event_skipped_no_readable_details', {
+      syncId,
+      eventId: event.id,
+    });
     await recordSyncAudit({
       syncId,
       userId,
@@ -953,7 +1292,11 @@ export async function syncEvent(
       reasonCode: 'no_readable_details',
       reasonMessage: 'Source event had no readable details after hydration',
     });
-    return;
+    return {
+      status: 'skipped',
+      reasonCode: 'no_readable_details',
+      reasonMessage: 'Source event had no readable details after hydration',
+    };
   }
 
   if (
@@ -965,7 +1308,11 @@ export async function syncEvent(
       copySettings.copyRsvpStatuses
     )
   ) {
-    console.log(`Skipping event ${event.id} (${event.summary}) due to sync filters`);
+    logInfo('sync_event_skipped_filtered', {
+      syncId,
+      eventId: event.id,
+      eventSummary: event.summary || null,
+    });
     await recordSyncAudit({
       syncId,
       userId,
@@ -978,7 +1325,11 @@ export async function syncEvent(
       reasonCode: 'filtered',
       reasonMessage: 'Event skipped by sync filters',
     });
-    return;
+    return {
+      status: 'skipped',
+      reasonCode: 'filtered',
+      reasonMessage: 'Event skipped by sync filters',
+    };
   }
 
   // Check if event is already synced
@@ -1033,12 +1384,16 @@ export async function syncEvent(
         eventSummary: event.summary || null,
       });
 
-      console.log(`Updated event ${event.id} in target calendar`);
+      logInfo('sync_event_updated', { syncId, eventId: event.id, targetCalendarId });
+      return { status: 'synced', targetEventId: existingSync.targetEventId };
     } catch (error: any) {
       if (error.code === 404) {
-        // Target event was deleted, recreate it
+        // Target event was deleted. Remove the stale mapping first: if the
+        // recreate below fails, "no mapping" lets the next run treat this as
+        // a fresh create instead of retrying against a dead target event id.
+        await prisma.syncedEvent.deleteMany({ where: { id: existingSync.id } });
         try {
-          await createSyncedEvent(
+          const targetEventId = await createSyncedEvent(
             syncId,
             userId,
             event,
@@ -1048,6 +1403,7 @@ export async function syncEvent(
             copySettings,
             direction
           );
+          return { status: 'synced', targetEventId };
         } catch (createError: any) {
           if (
             selectedAccountId &&
@@ -1055,10 +1411,12 @@ export async function syncEvent(
             isCredentialOrAccessError(createError) &&
             !isSyncMissingError(createError)
           ) {
-            console.warn(
-              `Retrying sync ${syncId} with account auto-detection after create failure: ${createError.message}`
-            );
-            await syncEvent(
+            logWarn('sync_event_retrying_with_auto_detection', {
+              syncId,
+              eventId: event.id,
+              error: createError.message,
+            });
+            return syncEvent(
               syncId,
               userId,
               event,
@@ -1067,9 +1425,9 @@ export async function syncEvent(
               undefined,
               true,
               sourceGoogleAccountId,
-              direction
+              direction,
+              options
             );
-            return;
           }
           await recordSyncFailure({
             syncId,
@@ -1102,7 +1460,10 @@ export async function syncEvent(
         }
         await updateSyncIfExists(
           syncId,
-          { targetGoogleAccountId: null, accountDetectionAttempts: 0 },
+          {
+            ...buildDestinationAccountUpdate(direction, null),
+            accountDetectionAttempts: 0,
+          },
           true
         );
         await recordSyncFailure({
@@ -1137,10 +1498,49 @@ export async function syncEvent(
       }
     }
   } else {
+    if (
+      await hasNativeDestinationDuplicate(
+        calendar,
+        targetCalendarId,
+        event,
+        options.destinationOccurrenceKeys
+      )
+    ) {
+      logInfo('sync_event_skipped_duplicate_ical_uid', {
+        syncId,
+        direction,
+        eventId: event.id,
+        sourceCalendarId,
+        targetCalendarId,
+      });
+      await recordSyncAudit({
+        syncId,
+        userId,
+        direction,
+        action: 'skip',
+        result: 'skipped',
+        sourceEventId: event.id,
+        sourceCalendarId,
+        targetCalendarId,
+        eventSummary: event.summary || null,
+        reasonCode: 'duplicate_ical_uid',
+        reasonMessage: 'The same native Google invite already exists on the destination calendar',
+      });
+      return {
+        status: 'duplicate',
+        reasonCode: 'duplicate_ical_uid',
+        reasonMessage: 'The same native Google invite already exists on the destination calendar',
+      };
+    }
+
     // Create new synced event
-    console.log(`Creating new synced event for source event ${event.id} (${event.summary})`);
+    logInfo('sync_event_creating', {
+      syncId,
+      eventId: event.id,
+      eventSummary: event.summary || null,
+    });
     try {
-      await createSyncedEvent(
+      const targetEventId = await createSyncedEvent(
         syncId,
         userId,
         event,
@@ -1150,6 +1550,7 @@ export async function syncEvent(
         copySettings,
         direction
       );
+      return { status: 'synced', targetEventId };
     } catch (error: any) {
       if (
         selectedAccountId &&
@@ -1157,10 +1558,12 @@ export async function syncEvent(
         isCredentialOrAccessError(error) &&
         !isSyncMissingError(error)
       ) {
-        console.warn(
-          `Retrying sync ${syncId} with account auto-detection after create failure: ${error.message}`
-        );
-        await syncEvent(
+        logWarn('sync_event_retrying_with_auto_detection', {
+          syncId,
+          eventId: event.id,
+          error: error.message,
+        });
+        return syncEvent(
           syncId,
           userId,
           event,
@@ -1169,9 +1572,9 @@ export async function syncEvent(
           undefined,
           true,
           sourceGoogleAccountId,
-          direction
+          direction,
+          options
         );
-        return;
       }
       await recordSyncFailure({
         syncId,
@@ -1225,16 +1628,19 @@ async function hydrateSourceEventIfMissingDetails(
     };
 
     if (!eventHasAnyCopyableDetails(hydrated)) {
-      console.warn(
-        `Source event ${event.id} for sync ${syncId} still has no visible details after hydration. Source account may only have free/busy access.`
-      );
+      logWarn('sync_event_no_details_after_hydration', {
+        syncId,
+        eventId: event.id,
+      });
     }
 
     return hydrated;
   } catch (error: any) {
-    console.warn(
-      `Failed to hydrate source event ${event.id} details for sync ${syncId}: ${error?.message || error}`
-    );
+    logWarn('sync_event_hydration_failed', {
+      syncId,
+      eventId: event.id,
+      error: error?.message || String(error),
+    });
     return event;
   }
 }
@@ -1249,7 +1655,11 @@ async function createSyncedEvent(
   settings?: SyncCopySettings,
   direction: SyncDirection = 'source_to_target'
 ) {
-  console.log(`createSyncedEvent: syncId=${syncId}, targetCalendar=${targetCalendarId}, accountId=${targetGoogleAccountId || 'null'}`);
+  logInfo('synced_event_create_started', {
+    syncId,
+    targetCalendarId,
+    accountId: targetGoogleAccountId || null,
+  });
   const calendar = await getAuthenticatedCalendar(userId, targetGoogleAccountId);
 
   try {
@@ -1342,6 +1752,7 @@ async function createSyncedEvent(
       targetCalendarId,
       accountId: targetGoogleAccountId || null,
     });
+    return createdOrUpdatedTargetEventId;
   } catch (error: any) {
     if (isCredentialOrAccessError(error) && !isSyncMissingError(error)) {
       // Access/auth issue on selected account - clear so future writes can auto-detect
@@ -1359,7 +1770,10 @@ async function createSyncedEvent(
       }
       await updateSyncIfExists(
         syncId,
-        { targetGoogleAccountId: null, accountDetectionAttempts: 0 },
+        {
+          ...buildDestinationAccountUpdate(direction, null),
+          accountDetectionAttempts: 0,
+        },
         true
       );
     }
@@ -1387,37 +1801,50 @@ export async function handleEventDeletion(
     },
   });
 
-  const recurringSeriesIdFromEventId = eventId.includes('_') ? eventId.split('_')[0] : null;
-  const recurringSeriesId = options?.recurringEventId || recurringSeriesIdFromEventId;
+  const recurringSeriesId =
+    options?.recurringEventId || getRecurringSeriesIdFromEventId(eventId) || null;
 
-  if (
-    syncedEventsToDelete.length === 0 &&
-    options?.isBulkSeriesCancellation &&
-    recurringSeriesId
-  ) {
-    const recurringMatches = await prisma.syncedEvent.findMany({
-      where: {
-        syncId,
-        sourceCalendarId,
-        OR: [
-          { sourceEventId: recurringSeriesId },
-          { sourceEventId: { startsWith: `${recurringSeriesId}_` } },
-        ],
-      },
-    });
+  // A cancelled event with no underscore in its id and no recurringEventId is
+  // a series master: sweep its instance mappings too, so instances outside
+  // the webhook delta window are still cleaned up.
+  const isSeriesMasterCancellation = !options?.recurringEventId && !eventId.includes('_');
+  const seriesSweepId = options?.isBulkSeriesCancellation
+    ? recurringSeriesId
+    : isSeriesMasterCancellation
+      ? eventId
+      : null;
+
+  if (seriesSweepId) {
+    const alreadyMatched = new Set(syncedEventsToDelete.map((mapping) => mapping.id));
+    const recurringMatches = (
+      await prisma.syncedEvent.findMany({
+        where: {
+          syncId,
+          sourceCalendarId,
+          OR: [
+            { sourceEventId: seriesSweepId },
+            { sourceEventId: { startsWith: `${seriesSweepId}_` } },
+          ],
+        },
+      })
+    ).filter((mapping) => !alreadyMatched.has(mapping.id));
     syncedEventsToDelete.push(...recurringMatches);
 
     if (recurringMatches.length > 0) {
-      console.log(
-        `Bulk cancellation fallback for series ${recurringSeriesId}: deleting ${recurringMatches.length} mapped events`
-      );
+      logInfo('series_cancellation_sweep', {
+        syncId,
+        seriesSweepId,
+        mappedEventCount: recurringMatches.length,
+      });
     }
   }
 
   if (syncedEventsToDelete.length === 0) {
-    console.log(
-      `No synced mapping found for cancelled event ${eventId} on sync ${syncId} (source calendar ${sourceCalendarId})`
-    );
+    logInfo('event_deletion_no_mapping_found', {
+      syncId,
+      eventId,
+      sourceCalendarId,
+    });
     await recordSyncAudit({
       syncId,
       userId,
@@ -1452,7 +1879,12 @@ export async function handleEventDeletion(
         // Event is already gone on target calendar; remove stale mapping.
         shouldDeleteMapping = true;
       } else {
-        console.error(`Error deleting synced event ${eventId}:`, error);
+        logError('event_deletion_failed', {
+          syncId,
+          eventId,
+          targetEventId: syncedEvent.targetEventId,
+          error: error instanceof Error ? error.message : String(error),
+        });
         await recordSyncFailure({
           syncId,
           userId,
@@ -1488,7 +1920,7 @@ export async function handleEventDeletion(
         targetEventId: syncedEvent.targetEventId,
         targetCalendarId: syncedEvent.targetCalendarId,
       });
-      console.log(`Deleted synced event ${syncedEvent.sourceEventId}`);
+      logInfo('event_deletion_completed', { syncId, sourceEventId: syncedEvent.sourceEventId });
     }
   }
 }

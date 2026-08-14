@@ -313,3 +313,56 @@ test('force sync returns synced after a successful run updates the mapping state
   assert.equal(result.item.targetEventId, 'target-success');
   assert.match(result.item.statusReason, /target-success/i);
 });
+
+test('force sync reports a matching native invite as skipped without creating a mapping', async () => {
+  const sync = buildSyncRecord({ isTwoWay: false, excludedKeywords: [] });
+  const service = buildSyncEventsDashboardService({
+    prisma: {
+      sync: { findFirst: async () => sync },
+      syncFailure: { findMany: async () => [] },
+      syncedEvent: { findMany: async () => [] },
+      syncEventAudit: {
+        findMany: async () => [
+          {
+            direction: 'source_to_target',
+            sourceEventId: 'event-duplicate',
+            sourceCalendarId: 'source-cal',
+            reasonCode: 'duplicate_ical_uid',
+            reasonMessage: 'The same native Google invite already exists on the destination calendar',
+          },
+        ],
+      },
+    },
+    getCalendar: (async () => ({
+      events: {
+        get: async () => ({
+          data: {
+            id: 'event-duplicate',
+            iCalUID: 'invite@example.com',
+            summary: 'Shared invite',
+            start: { dateTime: '2026-08-17T16:00:00Z' },
+            end: { dateTime: '2026-08-17T17:00:00Z' },
+          },
+        }),
+      },
+    })) as any,
+    rateLimitRetry: async (fn) => fn(),
+    runSyncEvent: async () => ({
+      status: 'duplicate',
+      reasonCode: 'duplicate_ical_uid',
+      reasonMessage: 'The same native Google invite already exists on the destination calendar',
+    }),
+    recordAudit: async () => undefined,
+    resolveFailuresForSourceEvent: async () => ({ count: 0 }),
+  });
+
+  const result = await service.forceSyncDashboardEvent(sync.id, sync.userId, {
+    direction: 'source_to_target',
+    sourceEventId: 'event-duplicate',
+    sourceCalendarId: 'source-cal',
+  });
+
+  assert.equal(result.item.status, 'skipped');
+  assert.match(result.item.statusReason, /same native Google invite/i);
+  assert.equal(result.item.targetEventId, null);
+});

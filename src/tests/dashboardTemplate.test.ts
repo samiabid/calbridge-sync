@@ -40,3 +40,13 @@ test('dashboard exposes and submits the optional clone color setting', async () 
   assert.match(template, /every clone created or updated by this sync uses this Google Calendar color/);
   assert.match(template, /cloneColorId: document\.getElementById\('cloneColorId'\)\.value/);
 });
+
+test('dashboard explains two-way backfill safety and exposes persisted run state', async () => {
+  const templatePath = path.join(process.cwd(), 'views', 'dashboard.ejs');
+  const template = await fs.readFile(templatePath, 'utf8');
+
+  assert.match(template, /Two-way syncs scan both calendars sequentially/i);
+  assert.match(template, /sync\.backfillStatus/);
+  assert.match(template, /A backfill is already running for this sync/);
+  assert.match(template, /native duplicate invites will be preserved/);
+});

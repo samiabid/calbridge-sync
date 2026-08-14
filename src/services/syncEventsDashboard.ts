@@ -1,7 +1,6 @@
-import { PrismaClient } from '@prisma/client';
 import { getAuthenticatedCalendar } from './calendar';
 import { withRateLimitRetry } from './rateLimit';
-import { syncEvent } from './sync';
+import { syncEvent, type SyncEventOutcome } from './sync';
 import {
   recordSyncAudit,
   resolveOpenFailuresForSourceEvent,
@@ -26,8 +25,8 @@ import {
   type SyncEventMappingOverlay,
   type SyncEventStatus,
 } from './syncEventsDashboardLogic';
+import { prisma } from './prisma';
 
-const prisma = new PrismaClient();
 
 interface DirectionContext {
   direction: SyncDirection;
@@ -117,7 +116,7 @@ interface SyncEventsDashboardServiceDeps {
   prisma?: any;
   getCalendar?: typeof getAuthenticatedCalendar;
   rateLimitRetry?: typeof withRateLimitRetry;
-  runSyncEvent?: typeof syncEvent;
+  runSyncEvent?: (...args: Parameters<typeof syncEvent>) => Promise<SyncEventOutcome | void>;
   recordAudit?: typeof recordSyncAudit;
   resolveFailuresForSourceEvent?: typeof resolveOpenFailuresForSourceEvent;
 }
@@ -225,16 +224,20 @@ async function buildDashboardEventItem(
   sync: EventDashboardSyncRecord,
   row: DashboardSourceEventRow,
   failureMap: Map<string, SyncEventFailureOverlay>,
-  mappingMap: Map<string, SyncEventMappingOverlay>
+  mappingMap: Map<string, SyncEventMappingOverlay>,
+  duplicateMap: Map<string, string>
 ): Promise<SyncDashboardEventItem> {
   const event = row.event;
   const key = createEventKey(row.direction, row.sourceCalendarId, event.id);
   const failure = failureMap.get(key) || null;
   const mapping = mappingMap.get(key) || null;
+  const duplicateReason = duplicateMap.get(key);
   const status = computeSyncEventStatus({
     failure,
     mapping,
-    skipReason: getSkipReason(sync, event),
+    skipReason: duplicateReason
+      ? { code: 'duplicate_ical_uid', message: duplicateReason }
+      : getSkipReason(sync, event),
   });
 
   return {
@@ -321,6 +324,7 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
   ): Promise<{
     failureMap: Map<string, SyncEventFailureOverlay>;
     mappingMap: Map<string, SyncEventMappingOverlay>;
+    duplicateMap: Map<string, string>;
   }> {
     const eventIds = Array.from(new Set(rows.map((row) => row.event.id).filter(Boolean)));
     const sourceCalendarIds = Array.from(new Set(rows.map((row) => row.sourceCalendarId)));
@@ -330,10 +334,11 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       return {
         failureMap: new Map(),
         mappingMap: new Map(),
+        duplicateMap: new Map(),
       };
     }
 
-    const [failures, mappings] = await Promise.all([
+    const [failures, mappings, duplicateAudits] = await Promise.all([
       prismaClient.syncFailure.findMany({
         where: {
           syncId,
@@ -353,6 +358,20 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
         },
         orderBy: [{ lastSyncedAt: 'desc' }],
       }),
+      prismaClient.syncEventAudit?.findMany
+        ? prismaClient.syncEventAudit.findMany({
+            where: {
+              syncId,
+              userId,
+              direction: { in: directions },
+              sourceEventId: { in: eventIds },
+              sourceCalendarId: { in: sourceCalendarIds },
+              reasonCode: 'duplicate_ical_uid',
+              result: 'skipped',
+            },
+            orderBy: [{ createdAt: 'desc' }],
+          })
+        : Promise.resolve([]),
     ]);
 
     const failureMap = new Map<string, SyncEventFailureOverlay>();
@@ -389,9 +408,27 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       }
     }
 
+    const duplicateMap = new Map<string, string>();
+    for (const audit of duplicateAudits) {
+      if (!audit.sourceEventId || !audit.sourceCalendarId) continue;
+      const key = createEventKey(
+        audit.direction as SyncDirection,
+        audit.sourceCalendarId,
+        audit.sourceEventId
+      );
+      if (!duplicateMap.has(key)) {
+        duplicateMap.set(
+          key,
+          audit.reasonMessage ||
+            'The same native Google invite already exists on the destination calendar.'
+        );
+      }
+    }
+
     return {
       failureMap,
       mappingMap,
+      duplicateMap,
     };
   }
 
@@ -445,9 +482,15 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
 
     const filteredRows = rows.filter((row) => eventMatchesSearch(row.event, search));
 
-    const { failureMap, mappingMap } = await getOverlayMaps(sync.id, userId, filteredRows);
+    const { failureMap, mappingMap, duplicateMap } = await getOverlayMaps(
+      sync.id,
+      userId,
+      filteredRows
+    );
     const items = await Promise.all(
-      filteredRows.map((row) => buildDashboardEventItem(sync, row, failureMap, mappingMap))
+      filteredRows.map((row) =>
+        buildDashboardEventItem(sync, row, failureMap, mappingMap, duplicateMap)
+      )
     );
     const paginated = paginateSyncEventRows(items, options.page, options.pageSize);
 
@@ -499,7 +542,7 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
     }
 
     try {
-      await runSyncEvent(
+      const outcome = await runSyncEvent(
         sync.id,
         userId,
         response.data,
@@ -511,7 +554,15 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
         direction
       );
 
-      const skipReason = getSkipReason(sync, response.data);
+      const skipReason =
+        outcome?.status === 'duplicate'
+          ? {
+              code: outcome.reasonCode || 'duplicate_ical_uid',
+              message:
+                outcome.reasonMessage ||
+                'The same native Google invite already exists on the destination calendar.',
+            }
+          : getSkipReason(sync, response.data);
       await resolveFailuresForSourceEvent(
         sync.id,
         userId,
@@ -551,7 +602,7 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
       throw error;
     }
 
-    const { failureMap, mappingMap } = await getOverlayMaps(sync.id, userId, [
+    const { failureMap, mappingMap, duplicateMap } = await getOverlayMaps(sync.id, userId, [
       {
         direction,
         sourceCalendarId,
@@ -573,7 +624,8 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
         event: response.data,
       },
       failureMap,
-      mappingMap
+      mappingMap,
+      duplicateMap
     );
 
     return {

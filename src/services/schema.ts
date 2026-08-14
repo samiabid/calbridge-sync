@@ -1,6 +1,6 @@
-import { PrismaClient } from '@prisma/client';
 
-const prisma = new PrismaClient();
+import { prisma } from './prisma';
+import { logError } from './logger';
 
 export async function ensureSyncColumns() {
   try {
@@ -51,6 +51,33 @@ export async function ensureSyncColumns() {
     );
     await prisma.$executeRawUnsafe(
       'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "lastSyncError" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "backfillRunId" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "backfillStatus" TEXT NOT NULL DEFAULT \'idle\''
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "backfillStartedAt" TIMESTAMP'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "backfillCompletedAt" TIMESTAMP'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "backfillLastError" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "lastAccountDetectionAt" TIMESTAMP'
+    );
+    await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "Sync_isActive_idx" ON "Sync"("isActive")'
+    );
+    await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "Sync_sourceChannelId_idx" ON "Sync"("sourceChannelId")'
+    );
+    await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "Sync_targetChannelId_idx" ON "Sync"("targetChannelId")'
     );
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "SyncEventAudit" (
@@ -131,7 +158,9 @@ export async function ensureSyncColumns() {
       'CREATE INDEX IF NOT EXISTS "SyncFailure_targetEventId_idx" ON "SyncFailure"("targetEventId")'
     );
   } catch (error) {
-    console.error('Failed to ensure Sync columns exist:', error);
+    logError('schema_ensure_columns_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     throw error;
   }
 }

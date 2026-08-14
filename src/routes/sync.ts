@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
 import { requireAuth } from '../middleware/auth';
 import { getCalendarList, getAuthenticatedCalendar } from '../services/calendar';
 import {
@@ -21,13 +20,58 @@ import {
   scanSyncOrphanClones,
 } from '../services/syncRepair';
 import { getProductionDiagnostics } from '../services/productionDiagnostics';
-import { normalizeGoogleEventColorId } from '../services/eventColors';
+import { ALLOWED_RSVP_STATUSES } from '../services/syncLogic';
+import { GOOGLE_EVENT_COLOR_IDS, normalizeGoogleEventColorId } from '../services/eventColors';
 import { buildSyncEventsRouter } from './syncEvents';
+import { prisma } from '../services/prisma';
+import { logError, logInfo } from '../services/logger';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 router.use('/', buildSyncEventsRouter());
+
+const MAX_EXCLUDED_KEYWORDS = 50;
+const MAX_KEYWORD_LENGTH = 100;
+const MAX_EVENT_IDENTIFIER_LENGTH = 64;
+
+function sanitizeExcludedKeywords(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input
+    .filter((keyword): keyword is string => typeof keyword === 'string')
+    .map((keyword) => keyword.trim().slice(0, MAX_KEYWORD_LENGTH))
+    .filter((keyword) => keyword.length > 0)
+    .slice(0, MAX_EXCLUDED_KEYWORDS);
+}
+
+function sanitizeExcludedColors(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return [
+    ...new Set(
+      input.filter(
+        (color): color is string => typeof color === 'string' && GOOGLE_EVENT_COLOR_IDS.has(color)
+      )
+    ),
+  ];
+}
+
+function sanitizeEventIdentifier(input: unknown): string | null {
+  if (typeof input !== 'string') return null;
+  const trimmed = input.trim().slice(0, MAX_EVENT_IDENTIFIER_LENGTH);
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function sanitizeRsvpStatuses(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return [
+    ...new Set(
+      input.filter(
+        (status): status is string =>
+          typeof status === 'string' &&
+          (ALLOWED_RSVP_STATUSES as readonly string[]).includes(status)
+      )
+    ),
+  ];
+}
 
 function getAccountStatusReason(error: unknown): string {
   const err = error as any;
@@ -58,7 +102,9 @@ router.get('/', requireAuth, async (req, res) => {
     const syncs = await getSyncs(req.session.userId!);
     res.json(syncs);
   } catch (error) {
-    console.error('Error fetching syncs:', error);
+    logError('syncs_fetch_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch syncs' });
   }
 });
@@ -190,7 +236,9 @@ router.get('/accounts', requireAuth, async (req, res) => {
 
     res.json(accountsWithStatus);
   } catch (error) {
-    console.error('Error fetching accounts:', error);
+    logError('accounts_fetch_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch accounts' });
   }
 });
@@ -233,7 +281,10 @@ router.delete('/accounts/:id', requireAuth, async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting account:', error);
+    logError('account_delete_failed', {
+      accountId: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to delete account' });
   }
 });
@@ -244,7 +295,9 @@ router.get('/calendars', requireAuth, async (req, res) => {
     const calendars = await getCalendarList(req.session.userId!);
     res.json(calendars);
   } catch (error) {
-    console.error('Error fetching calendars:', error);
+    logError('calendars_fetch_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to fetch calendars' });
   }
 });
@@ -292,8 +345,8 @@ router.post('/', requireAuth, async (req, res) => {
       targetCalendarName,
       isTwoWay: typeof isTwoWay === 'boolean' ? isTwoWay : true,
       syncStartMode: resolvedSyncStartMode,
-      excludedColors: excludedColors || [],
-      excludedKeywords: excludedKeywords || [],
+      excludedColors: sanitizeExcludedColors(excludedColors),
+      excludedKeywords: sanitizeExcludedKeywords(excludedKeywords),
       syncEventTitles: typeof syncEventTitles === 'boolean' ? syncEventTitles : true,
       syncEventDescription: typeof syncEventDescription === 'boolean' ? syncEventDescription : true,
       syncEventLocation: typeof syncEventLocation === 'boolean' ? syncEventLocation : true,
@@ -301,18 +354,17 @@ router.post('/', requireAuth, async (req, res) => {
       markEventPrivate: typeof markEventPrivate === 'boolean' ? markEventPrivate : false,
       disableRemindersForClones:
         typeof disableRemindersForClones === 'boolean' ? disableRemindersForClones : false,
-      eventIdentifier:
-        typeof eventIdentifier === 'string' && eventIdentifier.trim().length > 0
-          ? eventIdentifier.trim()
-          : null,
+      eventIdentifier: sanitizeEventIdentifier(eventIdentifier),
       cloneColorId: normalizeGoogleEventColorId(cloneColorId),
-      copyRsvpStatuses: Array.isArray(copyRsvpStatuses) ? copyRsvpStatuses : [],
+      copyRsvpStatuses: sanitizeRsvpStatuses(copyRsvpStatuses),
       syncFreeEvents: typeof syncFreeEvents === 'boolean' ? syncFreeEvents : true,
     });
 
     res.json(sync);
   } catch (error: any) {
-    console.error('Error creating sync:', error);
+    logError('sync_create_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     const message = error?.message || 'Failed to create sync';
     const normalizedMessage = String(message).toLowerCase();
     const status =
@@ -335,7 +387,10 @@ router.delete('/:id', requireAuth, async (req, res) => {
     await deleteSync(req.params.id, req.session.userId!, deleteEvents || false);
     res.json({ success: true });
   } catch (error) {
-    console.error('Error deleting sync:', error);
+    logError('sync_delete_failed', {
+      syncId: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to delete sync' });
   }
 });
@@ -343,13 +398,16 @@ router.delete('/:id', requireAuth, async (req, res) => {
 // Re-run initial backfill in the background for an existing sync.
 router.post('/:id/rerun-backfill', requireAuth, async (req, res) => {
   try {
-    await rerunMissedBackfill(req.params.id, req.session.userId!);
-    res.json({ success: true, message: 'Backfill started' });
+    const run = await rerunMissedBackfill(req.params.id, req.session.userId!);
+    res.json({ success: true, message: 'Backfill started', run });
   } catch (error: any) {
     const message = error?.message || 'Failed to start backfill';
-    const status = message.toLowerCase().includes('not found') || message.toLowerCase().includes('paused')
-      ? 400
-      : 500;
+    const status =
+      error?.code === 'BACKFILL_ALREADY_RUNNING'
+        ? 409
+        : message.toLowerCase().includes('not found') || message.toLowerCase().includes('paused')
+          ? 400
+          : 500;
     res.status(status).json({ error: message });
   }
 });
@@ -363,7 +421,8 @@ router.patch('/:id/toggle', requireAuth, async (req, res) => {
       data: {
         isActive,
         lastSyncStatus: isActive ? 'success' : 'paused',
-        ...(isActive ? {} : { lastSyncError: null }),
+        // Re-activation is a fresh start: let account detection retry.
+        ...(isActive ? { accountDetectionAttempts: 0 } : { lastSyncError: null }),
       },
     });
 
@@ -374,7 +433,10 @@ router.patch('/:id/toggle', requireAuth, async (req, res) => {
     const sync = await prisma.sync.findUnique({ where: { id: req.params.id } });
     res.json(sync);
   } catch (error) {
-    console.error('Error toggling sync:', error);
+    logError('sync_toggle_failed', {
+      syncId: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to toggle sync' });
   }
 });
@@ -400,8 +462,12 @@ router.patch('/:id/filters', requireAuth, async (req, res) => {
     const result = await prisma.sync.updateMany({
       where: { id: req.params.id, userId: req.session.userId! },
       data: {
-        excludedColors: Array.isArray(excludedColors) ? excludedColors : undefined,
-        excludedKeywords: Array.isArray(excludedKeywords) ? excludedKeywords : undefined,
+        excludedColors: Array.isArray(excludedColors)
+          ? sanitizeExcludedColors(excludedColors)
+          : undefined,
+        excludedKeywords: Array.isArray(excludedKeywords)
+          ? sanitizeExcludedKeywords(excludedKeywords)
+          : undefined,
         syncEventTitles: typeof syncEventTitles === 'boolean' ? syncEventTitles : undefined,
         syncEventDescription:
           typeof syncEventDescription === 'boolean' ? syncEventDescription : undefined,
@@ -411,14 +477,12 @@ router.patch('/:id/filters', requireAuth, async (req, res) => {
         disableRemindersForClones:
           typeof disableRemindersForClones === 'boolean' ? disableRemindersForClones : undefined,
         eventIdentifier:
-          typeof eventIdentifier === 'string'
-            ? eventIdentifier.trim().length > 0
-              ? eventIdentifier.trim()
-              : null
-            : undefined,
+          typeof eventIdentifier === 'string' ? sanitizeEventIdentifier(eventIdentifier) : undefined,
         cloneColorId:
           cloneColorId === undefined ? undefined : normalizeGoogleEventColorId(cloneColorId),
-        copyRsvpStatuses: Array.isArray(copyRsvpStatuses) ? copyRsvpStatuses : undefined,
+        copyRsvpStatuses: Array.isArray(copyRsvpStatuses)
+          ? sanitizeRsvpStatuses(copyRsvpStatuses)
+          : undefined,
         syncFreeEvents: typeof syncFreeEvents === 'boolean' ? syncFreeEvents : undefined,
       },
     });
@@ -431,7 +495,10 @@ router.patch('/:id/filters', requireAuth, async (req, res) => {
     
     res.json(sync);
   } catch (error) {
-    console.error('Error updating filters:', error);
+    logError('sync_filters_update_failed', {
+      syncId: req.params.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Failed to update filters' });
   }
 });
@@ -447,7 +514,10 @@ router.post('/migrate/target-accounts', requireAuth, async (req, res) => {
       },
     });
 
-    console.log(`Migrating ${syncsToMigrate.length} syncs for user ${req.session.userId}`);
+    logInfo('target_account_migration_started', {
+      syncCount: syncsToMigrate.length,
+      userId: req.session.userId,
+    });
 
     const results = {
       total: syncsToMigrate.length,
@@ -536,7 +606,9 @@ router.post('/migrate/target-accounts', requireAuth, async (req, res) => {
 
     res.json(results);
   } catch (error) {
-    console.error('Migration failed:', error);
+    logError('target_account_migration_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).json({ error: 'Migration failed' });
   }
 });

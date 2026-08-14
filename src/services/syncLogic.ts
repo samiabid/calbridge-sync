@@ -21,7 +21,8 @@ export interface EventSkipReason {
     | 'loop_prevention'
     | 'free_event'
     | 'rsvp'
-    | 'no_readable_details';
+    | 'no_readable_details'
+    | 'duplicate_ical_uid';
   message: string;
 }
 
@@ -192,16 +193,20 @@ export function shouldSkipEvent(
   );
 }
 
+export function getRecurringSeriesIdFromEventId(eventId: unknown): string | undefined {
+  if (typeof eventId !== 'string') return undefined;
+  const index = eventId.indexOf('_');
+  if (index <= 0) return undefined;
+
+  return eventId.slice(0, index);
+}
+
 export function getRecurringSeriesId(event: any): string | undefined {
   if (event?.recurringEventId && typeof event.recurringEventId === 'string') {
     return event.recurringEventId;
   }
 
-  if (typeof event?.id !== 'string') return undefined;
-  const index = event.id.indexOf('_');
-  if (index <= 0) return undefined;
-
-  return event.id.slice(0, index);
+  return getRecurringSeriesIdFromEventId(event?.id);
 }
 
 export function buildCancellationState(events: any[]): CancellationState {
@@ -242,4 +247,56 @@ export function shouldSkipActiveEventDueToCancellation(
 
   const recurringSeriesId = getRecurringSeriesId(event);
   return Boolean(recurringSeriesId && state.bulkCancelledSeriesIds.has(recurringSeriesId));
+}
+
+// The next webhook fetch must start no later than this run's fetch start:
+// events updated after fetch start may sit on already-fetched pages, so
+// advancing the watermark to the max event `updated` timestamp can skip them.
+// Using the earlier of the two keeps the extra overlap when Google's
+// `updated` values lag behind wall-clock time.
+export function computeNextWebhookWatermark(
+  fetchStartedAt: Date,
+  lastDetectedChangeAt: Date | null,
+  overlapMs: number
+): Date {
+  const base =
+    lastDetectedChangeAt && lastDetectedChangeAt.getTime() < fetchStartedAt.getTime()
+      ? lastDetectedChangeAt
+      : fetchStartedAt;
+  return new Date(Math.max(0, base.getTime() - overlapMs));
+}
+
+// Account detection is capped per burst, but re-opens after a cooldown so a
+// sync doesn't stay stuck once calendar access is restored.
+export function shouldAttemptAccountDetection(
+  attempts: number,
+  lastAttemptAt: Date | null,
+  now: Date,
+  options: { maxAttempts?: number; cooldownMs?: number } = {}
+): { attempt: boolean; isCooldownRetry: boolean } {
+  const maxAttempts = options.maxAttempts ?? 3;
+  const cooldownMs = options.cooldownMs ?? 6 * 60 * 60 * 1000;
+
+  if (attempts < maxAttempts) {
+    return { attempt: true, isCooldownRetry: false };
+  }
+
+  if (!lastAttemptAt || now.getTime() - lastAttemptAt.getTime() >= cooldownMs) {
+    return { attempt: true, isCooldownRetry: true };
+  }
+
+  return { attempt: false, isCooldownRetry: false };
+}
+
+// Older syncs may only have the legacy `googleAccountId`; every consumer
+// should resolve per-side account ids through this single fallback chain.
+export function resolveSyncAccounts(sync: {
+  googleAccountId: string;
+  sourceGoogleAccountId?: string | null;
+  targetGoogleAccountId?: string | null;
+}): { sourceAccountId: string; targetAccountId: string } {
+  return {
+    sourceAccountId: sync.sourceGoogleAccountId || sync.googleAccountId,
+    targetAccountId: sync.targetGoogleAccountId || sync.googleAccountId,
+  };
 }
