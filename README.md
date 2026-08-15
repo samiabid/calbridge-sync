@@ -207,6 +207,7 @@ The repo now includes `.github/workflows/webhook-renewal.yml`, which can trigger
 
 It also includes CI and a ten-minute production readiness monitor. Both use the same
 `APP_BASE_URL`; CI runs tests, the TypeScript build, and the production dependency audit.
+The production health and webhook-renewal workflows are optional for forks: if the production secrets below are absent, the scheduled jobs log a skip instead of failing.
 
 Configure these GitHub Actions secrets:
 
