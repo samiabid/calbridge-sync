@@ -1,4 +1,3 @@
-import { PrismaClient } from '@prisma/client';
 import { getAuthenticatedCalendar } from './calendar';
 import { withRateLimitRetry } from './rateLimit';
 import { handleEventDeletion, syncEvent } from './sync';
@@ -11,8 +10,13 @@ import {
   getTargetEventSyncId,
   type OrphanReason,
 } from './syncRepairLogic';
+import { resolveSyncAccounts } from './syncLogic';
+import { prisma } from './prisma';
+import {
+  HEAVY_CALENDAR_OPERATION_LEASE,
+  withOperationLease,
+} from './operationLease';
 
-const prisma = new PrismaClient();
 
 interface RepairOptions {
   daysBack?: unknown;
@@ -32,6 +36,8 @@ export interface ReconciliationDirectionResult {
   processed: number;
   synced: number;
   deleted: number;
+  skipped: number;
+  duplicate: number;
   failed: number;
 }
 
@@ -59,8 +65,8 @@ export interface OrphanScanResult {
 }
 
 function getDirectionContexts(sync: any): DirectionContext[] {
-  const sourceGoogleAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
-  const targetGoogleAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
+  const { sourceAccountId: sourceGoogleAccountId, targetAccountId: targetGoogleAccountId } =
+    resolveSyncAccounts(sync);
 
   const contexts: DirectionContext[] = [
     {
@@ -165,7 +171,7 @@ async function checkSourceEventExists(calendar: any, calendarId: string, eventId
   }
 }
 
-export async function runSyncReconciliation(
+async function performSyncReconciliation(
   syncId: string,
   userId: string,
   options: RepairOptions = {}
@@ -193,6 +199,8 @@ export async function runSyncReconciliation(
       processed: 0,
       synced: 0,
       deleted: 0,
+      skipped: 0,
+      duplicate: 0,
       failed: 0,
     };
 
@@ -213,7 +221,7 @@ export async function runSyncReconciliation(
           );
           result.deleted += 1;
         } else {
-          await syncEvent(
+          const outcome = await syncEvent(
             sync.id,
             userId,
             event,
@@ -224,7 +232,7 @@ export async function runSyncReconciliation(
             context.sourceGoogleAccountId,
             context.direction
           );
-          result.synced += 1;
+          result[outcome.status] += 1;
         }
       } catch (error: any) {
         result.failed += 1;
@@ -242,7 +250,7 @@ export async function runSyncReconciliation(
       direction: context.direction,
       action: 'reconcile',
       result: result.failed > 0 ? 'failure' : 'success',
-      reasonMessage: `Reconciliation window ${window.daysBack}d back / ${window.daysForward}d forward: processed=${result.processed}, synced=${result.synced}, deleted=${result.deleted}, failed=${result.failed}`,
+      reasonMessage: `Reconciliation window ${window.daysBack}d back / ${window.daysForward}d forward: processed=${result.processed}, synced=${result.synced}, skipped=${result.skipped}, duplicate=${result.duplicate}, deleted=${result.deleted}, failed=${result.failed}`,
     });
   }
 
@@ -251,6 +259,18 @@ export async function runSyncReconciliation(
     window,
     directions,
   };
+}
+
+export async function runSyncReconciliation(
+  syncId: string,
+  userId: string,
+  options: RepairOptions = {}
+): Promise<ReconciliationResult> {
+  return withOperationLease(
+    HEAVY_CALENDAR_OPERATION_LEASE,
+    () => performSyncReconciliation(syncId, userId, options),
+    { holder: `reconciliation:${syncId}` }
+  );
 }
 
 export async function scanSyncOrphanClones(

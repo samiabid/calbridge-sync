@@ -1,4 +1,4 @@
-import { getEventMeetingLink } from './syncLogic';
+import { getEventMeetingLink, getEventSyncLineage } from './syncLogic';
 import { normalizeGoogleEventColorId } from './eventColors';
 
 export interface TargetEventCopySettings {
@@ -10,6 +10,11 @@ export interface TargetEventCopySettings {
   disableRemindersForClones: boolean;
   eventIdentifier: string | null;
   cloneColorId: string | null;
+}
+
+export interface TargetEventLineageContext {
+  sourceCalendarId: string;
+  targetCalendarId: string;
 }
 
 export function normalizeEventIdentifier(
@@ -50,13 +55,26 @@ function getTargetEventDescription(
 export function buildTargetEventRequestBody(
   syncId: string,
   event: any,
-  settings: TargetEventCopySettings
+  settings: TargetEventCopySettings,
+  lineageContext?: TargetEventLineageContext
 ) {
   const eventIdentifier = normalizeEventIdentifier(settings);
   const sourceSummary =
     typeof event?.summary === 'string' && event.summary.trim().length > 0
       ? event.summary
       : 'Busy';
+  const existingLineage = getEventSyncLineage(event);
+  const syncLineage = [...new Set([...existingLineage.syncIds, syncId])];
+  const calendarLineage = lineageContext
+    ? [
+        ...new Set([
+          ...existingLineage.calendarIds,
+          lineageContext.sourceCalendarId,
+          lineageContext.targetCalendarId,
+        ]),
+      ]
+    : existingLineage.calendarIds;
+  const sourceMetadata = event?.extendedProperties?.private || {};
 
   return {
     summary: settings.syncEventTitles
@@ -79,7 +97,11 @@ export function buildTargetEventRequestBody(
     extendedProperties: {
       private: {
         syncId,
-        originalEventId: event.id,
+        originalEventId: sourceMetadata.originalEventId || event.id,
+        syncLineage: JSON.stringify(syncLineage),
+        ...(calendarLineage.length > 0
+          ? { calendarLineage: JSON.stringify(calendarLineage) }
+          : {}),
       },
     },
   };

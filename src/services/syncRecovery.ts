@@ -1,4 +1,3 @@
-import { PrismaClient } from '@prisma/client';
 import { getAuthenticatedCalendar } from './calendar';
 import { withRateLimitRetry } from './rateLimit';
 import { handleEventDeletion, syncEvent } from './sync';
@@ -9,24 +8,27 @@ import {
   resolveSyncFailureById,
   type SyncDirection,
 } from './syncAudit';
+import { resolveSyncAccounts } from './syncLogic';
+import { prisma } from './prisma';
 
-const prisma = new PrismaClient();
 
 function getDirectionContext(sync: any, direction: SyncDirection) {
+  const { sourceAccountId, targetAccountId } = resolveSyncAccounts(sync);
+
   if (direction === 'source_to_target') {
     return {
       sourceCalendarId: sync.sourceCalendarId,
       targetCalendarId: sync.targetCalendarId,
-      sourceGoogleAccountId: sync.sourceGoogleAccountId || sync.googleAccountId,
-      targetGoogleAccountId: sync.targetGoogleAccountId || sync.googleAccountId,
+      sourceGoogleAccountId: sourceAccountId,
+      targetGoogleAccountId: targetAccountId,
     };
   }
 
   return {
     sourceCalendarId: sync.targetCalendarId,
     targetCalendarId: sync.sourceCalendarId,
-    sourceGoogleAccountId: sync.targetGoogleAccountId || sync.googleAccountId,
-    targetGoogleAccountId: sync.sourceGoogleAccountId || sync.googleAccountId,
+    sourceGoogleAccountId: targetAccountId,
+    targetGoogleAccountId: sourceAccountId,
   };
 }
 

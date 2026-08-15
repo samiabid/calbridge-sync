@@ -1,3 +1,7 @@
+import { logError, logWarn } from './logger';
+import { sendAlert } from './alerts';
+import { waitForGoogleApiTurn } from './googleApiGovernor';
+
 const DEFAULT_MAX_RETRIES = 6;
 const DEFAULT_BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_DELAY_MS = 30000;
@@ -95,22 +99,40 @@ export async function withRateLimitRetry<T>(
   let attempt = 0;
   while (true) {
     try {
+      await waitForGoogleApiTurn();
       return await fn();
     } catch (error: any) {
       if (!isRateLimitError(error) || attempt >= maxRetries) {
+        if (isRateLimitError(error)) {
+          const reason = getRateLimitReason(error);
+          logError('google_api_rate_limit_exhausted', {
+            context,
+            attempts: attempt + 1,
+            maxRetries,
+            ...(reason ? { reason } : {}),
+          });
+          void sendAlert({
+            severity: 'error',
+            key: 'google_api_rate_limit_exhausted',
+            message: 'Google Calendar API rate-limit retries were exhausted.',
+            details: { context, attempts: attempt + 1, reason },
+            cooldownMs: 30 * 60 * 1000,
+          });
+        }
         throw error;
       }
 
       const delayMs = getRetryDelayMs(error, attempt, baseDelayMs, maxDelayMs);
       const reason = getRateLimitReason(error);
-      console.warn(
-        `Rate-limited during ${context}. retry=${attempt + 1}/${maxRetries} delayMs=${delayMs}${
-          reason ? ` reason=${reason}` : ''
-        }`
-      );
+      logWarn('google_api_rate_limited', {
+        context,
+        retry: attempt + 1,
+        maxRetries,
+        delayMs,
+        ...(reason ? { reason } : {}),
+      });
       await sleepMs(delayMs);
       attempt += 1;
     }
   }
 }
-

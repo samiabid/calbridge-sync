@@ -144,6 +144,9 @@ INTERNAL_CRON_TOKEN=<long-random-string>
 ALLOWED_LOGIN_EMAILS=owner@example.com
 ALLOWED_GOOGLE_ACCOUNT_EMAILS=owner@example.com,work@example.com
 SYNC_FUTURE_DAYS=365
+GOOGLE_API_MIN_INTERVAL_MS=125
+SYNC_CATCHUP_INTERVAL_MS=300000
+SYNC_AUDIT_RETENTION_DAYS=180
 ```
 
 `GOOGLE_REDIRECT_URI` can be omitted if `PUBLIC_URL` is set, but Google Cloud must still allow:
@@ -156,6 +159,11 @@ Both values are required in production for `/ready` to be healthy.
 `SYNC_FUTURE_DAYS` is optional and defaults to `365`. It bounds webhook and initial backfill
 expansion of future recurring events so a long-running series does not consume Google Calendar
 quota by syncing decades of instances.
+
+`GOOGLE_API_MIN_INTERVAL_MS` globally paces Calendar API requests in each app process. Large
+backfills and reconciliation jobs are also serialized with a database lease, so multiple users
+cannot launch quota-heavy work at the same time. `SYNC_CATCHUP_INTERVAL_MS` defaults to five
+minutes and runs incremental sync-token catch-up even if Google webhook delivery was missed.
 
 ### Step 5: Update Google OAuth Settings
 
@@ -196,6 +204,9 @@ Recommended usage:
 ### GitHub Actions Scheduler
 
 The repo now includes `.github/workflows/webhook-renewal.yml`, which can trigger the protected renewal endpoint on a daily schedule and via manual dispatch.
+
+It also includes CI and a ten-minute production readiness monitor. Both use the same
+`APP_BASE_URL`; CI runs tests, the TypeScript build, and the production dependency audit.
 
 Configure these GitHub Actions secrets:
 
@@ -268,6 +279,7 @@ Production startup and `/ready` are intentionally fail-closed. In production, th
 - `ALLOWED_GOOGLE_ACCOUNT_EMAILS`
 - `INTERNAL_CRON_TOKEN`
 - webhook renewal scheduling
+- scheduled incremental catch-up
 
 If `/ready` is unhealthy after a deploy, do not start calendar repair work first. Fix the failing readiness check, redeploy if needed, then re-test sync behavior.
 
@@ -288,6 +300,46 @@ The diagnostics response is read-only and reports:
 
 Diagnostics must not be treated as cleanup approval. If duplicates, orphan clones, or bad calendar events are found in production, prepare a scoped cleanup plan first. Do not delete calendar events or database rows without explicit approval.
 
+### Database Migrations and Retention
+
+Production startup performs the Prisma bootstrap and then applies checksummed SQL files from
+`prisma/app-migrations`. Applied files must never be edited; add a new numbered migration instead.
+Startup refuses changed migration checksums. The mapping uniqueness index is installed only when
+historical duplicate mappings are absent. If duplicates exist, startup remains available but emits
+`mapping_invariant_blocked_by_duplicates` for an approved cleanup decision.
+
+Sync audit rows are retained for 180 days by default. Override with
+`SYNC_AUDIT_RETENTION_DAYS` between 30 and 3650 days. Event mappings and failure records are not
+removed by retention.
+
+### Railway Backups
+
+Enable scheduled volume backups for the PostgreSQL service in Railway before relying solely on
+this app:
+
+1. Open the PostgreSQL service and its volume.
+2. Enable daily backups and retain at least one weekly restore point.
+3. Record the schedule and latest successful snapshot in the operations log.
+4. Quarterly, restore a snapshot into a separate temporary PostgreSQL service.
+5. Point a temporary app environment at the restored database and run `/ready` plus read-only diagnostics.
+6. Delete the temporary environment only after the restore has been verified. Never test restore against production.
+
+### Synthetic Sync Canary
+
+The optional canary repeatedly force-syncs one dedicated, non-sensitive event and verifies that a
+target mapping exists. Configure a dedicated sync and source event in Railway:
+
+```bash
+SYNC_CANARY_SYNC_ID=<dedicated-sync-id>
+SYNC_CANARY_SOURCE_EVENT_ID=<stable-source-event-id>
+SYNC_CANARY_DIRECTION=source_to_target
+```
+
+Then set the GitHub Actions repository variable `SYNC_CANARY_ENABLED=true`. The
+`Sync Canary` workflow runs every 30 minutes and calls the protected
+`POST /webhook/internal/canary` endpoint. Leave it disabled until a dedicated canary event and
+calendar have been approved; do not point it at a real meeting.
+
 ### Mapping and Webhook Safety
 
 The sync path now keeps one active mapping for each `syncId + sourceCalendarId + sourceEventId`. If a target event was deleted and must be recreated, the stale mapping is replaced instead of leaving an additional mapping behind.
@@ -301,6 +353,18 @@ Recurring masters are expanded through Google’s instances endpoint only inside
 Backfills persist a per-direction recurrence horizon. Daily post-renewal maintenance catches up active sync tokens and extends horizons that are within 14 days of expiry, keeping long-running series materialized without repeated manual backfills.
 
 Webhook renewal now includes active syncs with missing channel metadata and attempts to stop old Google channels after replacement channels are successfully registered.
+
+Pausing a sync now makes notifications inert, stops and clears its Google channels, and preserves
+incremental tokens. Resuming registers fresh channels and immediately catches up both directions.
+If setup or catch-up fails, the sync stays visible in error state and scheduled maintenance retries.
+
+When a previously mapped event becomes excluded by keyword, color, free/busy, RSVP, or loop
+rules, the app removes only its mapped app-owned clone and then removes the mapping. Temporary
+loss of readable event details does not delete an existing clone.
+
+New clones carry sync and calendar lineage. This blocks repeats through the same sync or calendar
+while allowing safe hub-style multi-hop syncs. Legacy clones without lineage remain conservatively
+blocked until a normal source update, force-sync, or backfill rewrites them.
 
 ## Usage
 
@@ -436,6 +500,7 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
   - Cause: a large backfill or a recurring series with many instances can consume Calendar API quota.
   - Fix: recurring master changes expand through a bounded instances request, while ordinary webhook catch-up uses unexpanded Google sync-token deltas. `SYNC_FUTURE_DAYS` defaults to 365.
   - Avoid repeatedly re-running backfill while rate-limited; let webhook processing catch up after the bounded-window fix is deployed.
+  - Current versions pace all Google requests and queue quota-heavy backfill/reconciliation work globally. Inspect `google_api_rate_limit_exhausted` alerts if retries are ever exhausted.
 - Recurring changes do not appear after the app was offline.
   - Check read-only diagnostics for `missing_sync_token` and inspect logs for `webhook_sync_token_expired`.
   - The daily webhook-renewal workflow schedules catch-up automatically. A token-expiry recovery also starts reconciliation without deleting native calendar events.

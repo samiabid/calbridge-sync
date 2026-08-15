@@ -6,6 +6,7 @@ import {
   deleteSync,
   getSyncs,
   rerunMissedBackfill,
+  setSyncActiveStatus,
   type SyncStartMode,
 } from '../services/sync';
 import {
@@ -173,7 +174,7 @@ router.post('/:id/reconcile', requireAuth, async (req, res) => {
     res.json(result);
   } catch (error: any) {
     const message = error?.message || 'Failed to run reconciliation';
-    res.status(400).json({ error: message });
+    res.status(error?.code === 'OPERATION_LEASE_BUSY' ? 409 : 400).json({ error: message });
   }
 });
 
@@ -399,7 +400,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
 router.post('/:id/rerun-backfill', requireAuth, async (req, res) => {
   try {
     const run = await rerunMissedBackfill(req.params.id, req.session.userId!);
-    res.json({ success: true, message: 'Backfill started', run });
+    res.json({ success: true, message: 'Backfill queued', run });
   } catch (error: any) {
     const message = error?.message || 'Failed to start backfill';
     const status =
@@ -415,24 +416,19 @@ router.post('/:id/rerun-backfill', requireAuth, async (req, res) => {
 // Toggle sync active status
 router.patch('/:id/toggle', requireAuth, async (req, res) => {
   try {
-    const isActive = Boolean(req.body.isActive);
-    const result = await prisma.sync.updateMany({
-      where: { id: req.params.id, userId: req.session.userId! },
-      data: {
-        isActive,
-        lastSyncStatus: isActive ? 'success' : 'paused',
-        // Re-activation is a fresh start: let account detection retry.
-        ...(isActive ? { accountDetectionAttempts: 0 } : { lastSyncError: null }),
-      },
-    });
-
-    if (result.count === 0) {
-      return res.status(404).json({ error: 'Sync not found' });
+    if (typeof req.body.isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive must be a boolean' });
     }
-
-    const sync = await prisma.sync.findUnique({ where: { id: req.params.id } });
+    const sync = await setSyncActiveStatus(
+      req.params.id,
+      req.session.userId!,
+      req.body.isActive
+    );
     res.json(sync);
   } catch (error) {
+    if (error instanceof Error && error.message === 'Sync not found') {
+      return res.status(404).json({ error: error.message });
+    }
     logError('sync_toggle_failed', {
       syncId: req.params.id,
       error: error instanceof Error ? error.message : String(error),

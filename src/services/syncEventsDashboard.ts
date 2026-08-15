@@ -199,7 +199,7 @@ async function listEventsInWindow(
   return events.filter((event) => Boolean(event?.id));
 }
 
-function getSkipReason(sync: EventDashboardSyncRecord, event: any) {
+function getSkipReason(sync: EventDashboardSyncRecord, event: any, targetCalendarId: string) {
   const readableReason = getReadableDetailsSkipReason(event, {
     syncEventTitles: sync.syncEventTitles,
     syncEventDescription: sync.syncEventDescription,
@@ -216,7 +216,8 @@ function getSkipReason(sync: EventDashboardSyncRecord, event: any) {
     sync.excludedColors,
     sync.excludedKeywords,
     sync.syncFreeEvents,
-    sync.copyRsvpStatuses
+    sync.copyRsvpStatuses,
+    { syncId: sync.id, targetCalendarId }
   );
 }
 
@@ -237,7 +238,7 @@ async function buildDashboardEventItem(
     mapping,
     skipReason: duplicateReason
       ? { code: 'duplicate_ical_uid', message: duplicateReason }
-      : getSkipReason(sync, event),
+      : getSkipReason(sync, event, row.targetCalendarId),
   });
 
   return {
@@ -562,7 +563,7 @@ export function buildSyncEventsDashboardService(deps: SyncEventsDashboardService
                 outcome.reasonMessage ||
                 'The same native Google invite already exists on the destination calendar.',
             }
-          : getSkipReason(sync, response.data);
+          : getSkipReason(sync, response.data, context.targetCalendarId);
       await resolveFailuresForSourceEvent(
         sync.id,
         userId,

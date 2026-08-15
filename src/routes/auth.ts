@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { PrismaClient } from '@prisma/client';
+import { prisma as defaultPrisma } from '../services/prisma';
 import { createOAuth2Client, getAuthUrl as buildGoogleAuthUrl } from '../config/google';
 import { google } from 'googleapis';
 import { requireAuth } from '../middleware/auth';
@@ -15,7 +15,6 @@ import {
   normalizeEmail,
 } from '../config/accessControl';
 
-const defaultPrisma = new PrismaClient();
 const OAUTH_STATE_MAX_AGE_MS = 10 * 60 * 1000;
 
 interface AuthRouteDeps {
@@ -285,6 +284,13 @@ export function buildAuthRouter(deps: AuthRouteDeps = {}) {
             });
           }
 
+          // Restored access is exactly when stuck account detection should
+          // retry immediately.
+          await prisma.sync.updateMany({
+            where: { userId: sessionUser.id, accountDetectionAttempts: { gt: 0 } },
+            data: { accountDetectionAttempts: 0 },
+          });
+
           info('oauth_reauth_success', {
             userId: sessionUser.id,
             accountId: targetAccount.id,
@@ -362,6 +368,13 @@ export function buildAuthRouter(deps: AuthRouteDeps = {}) {
             },
           });
         }
+
+        // A newly connected or refreshed account may be the one detection
+        // was missing; let stuck syncs retry immediately.
+        await prisma.sync.updateMany({
+          where: { userId: sessionUser.id, accountDetectionAttempts: { gt: 0 } },
+          data: { accountDetectionAttempts: 0 },
+        });
 
         info('oauth_add_account_success', {
           userId: sessionUser.id,
@@ -565,7 +578,9 @@ export function buildAuthRouter(deps: AuthRouteDeps = {}) {
   router.get('/logout', (req, res) => {
     req.session.destroy((err) => {
       if (err) {
-        console.error('Error destroying session:', err);
+        logError('session_destroy_failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
       res.redirect('/');
     });

@@ -106,6 +106,45 @@ test('skip rules cover filters, free events, loop prevention, and RSVP', () => {
   );
 });
 
+test('loop prevention allows safe multi-hop syncs but blocks repeated paths', () => {
+  const clone = {
+    extendedProperties: {
+      private: {
+        syncId: 'sync-1',
+        syncLineage: '["sync-1"]',
+        calendarLineage: '["calendar-a","calendar-b"]',
+      },
+    },
+  };
+  const excludedColors: string[] = [];
+  const excludedKeywords: string[] = [];
+  const rsvpStatuses = ['accepted'];
+
+  assert.equal(
+    shouldSkipEvent(clone, excludedColors, excludedKeywords, true, rsvpStatuses, { syncId: 'sync-2', targetCalendarId: 'calendar-c' }),
+    false
+  );
+  assert.equal(
+    shouldSkipEvent(clone, excludedColors, excludedKeywords, true, rsvpStatuses, { syncId: 'sync-1', targetCalendarId: 'calendar-c' }),
+    true
+  );
+  assert.equal(
+    shouldSkipEvent(clone, excludedColors, excludedKeywords, true, rsvpStatuses, { syncId: 'sync-2', targetCalendarId: 'calendar-a' }),
+    true
+  );
+  assert.equal(
+    shouldSkipEvent(
+      { extendedProperties: { private: { syncId: 'legacy-sync' } } },
+      excludedColors,
+      excludedKeywords,
+      true,
+      rsvpStatuses,
+      { syncId: 'sync-2', targetCalendarId: 'calendar-c' }
+    ),
+    true
+  );
+});
+
 test('normalizeRsvpStatuses falls back to all statuses when input is invalid or empty', () => {
   assert.deepEqual(normalizeRsvpStatuses(undefined), [
     'accepted',

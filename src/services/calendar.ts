@@ -1,9 +1,9 @@
-import { PrismaClient } from '@prisma/client';
 import { google } from 'googleapis';
 import { createOAuth2Client } from '../config/google';
 import { decryptToken } from './tokenCrypto';
+import { prisma } from './prisma';
+import { logError } from './logger';
 
-const prisma = new PrismaClient();
 
 function buildCalendarClient(accessToken: string, refreshToken: string) {
   const oauth2Client = createOAuth2Client();
@@ -40,13 +40,18 @@ export async function getCalendarList(userId: string) {
         name: cal.summary!,
         primary: cal.primary || false,
         backgroundColor: cal.backgroundColor,
+        accessRole: cal.accessRole || null,
         account: account.displayName, // Add account identifier
         accountId: account.id, // Add account ID for sync creation
       })) || [];
 
       allCalendars.push(...calendars);
     } catch (error) {
-      console.error(`Failed to fetch calendars for account ${account.displayName}:`, error);
+      logError('calendar_list_fetch_failed', {
+        accountId: account.id,
+        accountDisplayName: account.displayName,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // Continue with other accounts
     }
   }

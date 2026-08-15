@@ -3,26 +3,13 @@ import { handleWebhookNotification } from '../services/webhook';
 import { sendAlert } from '../services/alerts';
 import { logError, logInfo, logWarn } from '../services/logger';
 import { runWebhookRenewalCheck } from '../services/webhookRenewal';
-
-function hasValidInternalToken(req: any, configuredToken: string | undefined) {
-  if (!configuredToken) return false;
-
-  const authHeader = req.headers.authorization;
-  const bearerToken =
-    typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-      ? authHeader.slice('Bearer '.length).trim()
-      : null;
-  const headerToken = req.headers['x-internal-token'];
-  const providedToken =
-    bearerToken ||
-    (typeof headerToken === 'string' ? headerToken.trim() : Array.isArray(headerToken) ? headerToken[0] : null);
-
-  return providedToken === configuredToken;
-}
+import { runSyncMaintenanceNow } from '../services/syncMaintenance';
+import { runSyntheticSyncCanary } from '../services/syncCanary';
+import { hasValidInternalToken, safeEqual } from '../utils/security';
 
 interface WebhookRouteDeps {
   handleWebhook?: typeof handleWebhookNotification;
-  runRenewalCheck?: typeof runWebhookRenewalCheck;
+  runRenewalCheck?: (options?: { force?: boolean }) => Promise<unknown>;
   sendTestAlert?: typeof sendAlert;
 }
 
@@ -46,10 +33,14 @@ export function buildWebhookRouter(deps: WebhookRouteDeps = {}) {
       }
 
       const configuredToken = process.env.GOOGLE_WEBHOOK_TOKEN;
-      // Backward-compatible: enforce token only when both configured and present.
-      // Older channels created before token rollout may not send one.
-      if (configuredToken && channelToken && channelToken !== configuredToken) {
-        logWarn('webhook_google_token_mismatch');
+      // When a token is configured, every channel must present a matching one.
+      // Channels registered before the token rollout must be re-registered
+      // (POST /webhook/internal/renew?force=true) before enabling this.
+      if (configuredToken && (!channelToken || !safeEqual(channelToken, configuredToken))) {
+        logWarn('webhook_google_token_mismatch', {
+          channelId,
+          tokenPresent: Boolean(channelToken),
+        });
         res.status(200).send('OK');
         return;
       }
@@ -93,11 +84,49 @@ export function buildWebhookRouter(deps: WebhookRouteDeps = {}) {
     }
 
     try {
-      await renewalCheck();
-      res.json({ success: true });
+      const force = req.query?.force === 'true';
+      const result = await renewalCheck({ force });
+      res.json({ success: true, force, result });
     } catch (error: any) {
       const message = error instanceof Error ? error.message : String(error);
       logError('webhook_internal_renew_failed', { error: message });
+      res.status(500).json({ error: message });
+    }
+  });
+
+  router.post('/internal/catchup', async (req, res) => {
+    const configuredToken = process.env.INTERNAL_CRON_TOKEN;
+    if (!configuredToken) {
+      return res.status(503).json({ error: 'Internal catch-up token is not configured' });
+    }
+    if (!hasValidInternalToken(req, configuredToken)) {
+      logWarn('webhook_internal_catchup_unauthorized');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+      const result = await runSyncMaintenanceNow();
+      res.json({ success: true, result });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logError('webhook_internal_catchup_failed', { error: message });
+      res.status(500).json({ error: message });
+    }
+  });
+
+  router.post('/internal/canary', async (req, res) => {
+    const configuredToken = process.env.INTERNAL_CRON_TOKEN;
+    if (!configuredToken) {
+      return res.status(503).json({ error: 'Internal canary token is not configured' });
+    }
+    if (!hasValidInternalToken(req, configuredToken)) {
+      logWarn('webhook_internal_canary_unauthorized');
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    try {
+      const result = await runSyntheticSyncCanary();
+      res.json(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       res.status(500).json({ error: message });
     }
   });

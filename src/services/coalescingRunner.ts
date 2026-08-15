@@ -27,4 +27,18 @@ export class CoalescingRunner {
     })();
     return state.promise;
   }
+
+  async drain(timeoutMs: number = 10_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.runs.size > 0) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return false;
+      const active = Array.from(this.runs.values(), (state) => state.promise);
+      await Promise.race([
+        Promise.allSettled(active),
+        new Promise((resolve) => setTimeout(resolve, remainingMs)),
+      ]);
+    }
+    return true;
+  }
 }

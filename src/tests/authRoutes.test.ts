@@ -111,6 +111,9 @@ function createTestRouter(options: {
           upsert: async () => null,
           update: async () => null,
         },
+        sync: {
+          updateMany: async () => ({ count: 0 }),
+        },
       },
     createOAuth2Client: () => ({
       getToken: async () => ({ tokens }),
@@ -348,6 +351,7 @@ test('logged-in add-account allows allowlisted connected Google accounts', async
     },
     async () => {
       let upsertDisplayName = '';
+      let detectionResetWhere: any = null;
       const router = createTestRouter({
         email: 'sami@solvaa.co.uk',
         prisma: {
@@ -364,6 +368,12 @@ test('logged-in add-account allows allowlisted connected Google accounts', async
             },
             update: async () => null,
           },
+          sync: {
+            updateMany: async (args: any) => {
+              detectionResetWhere = args.where;
+              return { count: 1 };
+            },
+          },
         },
       });
       const req = callbackRequest({ userId: 'user-1' });
@@ -373,6 +383,11 @@ test('logged-in add-account allows allowlisted connected Google accounts', async
 
       assert.equal(res.redirectedTo, '/dashboard');
       assert.equal(upsertDisplayName, 'sami@solvaa.co.uk');
+      // Connecting an account resets stuck account detection for the user.
+      assert.deepEqual(detectionResetWhere, {
+        userId: 'user-1',
+        accountDetectionAttempts: { gt: 0 },
+      });
     }
   );
 });

@@ -1,6 +1,6 @@
-import { PrismaClient } from '@prisma/client';
+import crypto from 'crypto';
+import { prisma } from './prisma';
 
-const prisma = new PrismaClient();
 
 export type SyncDirection = 'source_to_target' | 'target_to_source';
 export type SyncAction =
@@ -29,7 +29,7 @@ interface AuditRecordInput {
   reasonMessage?: string | null;
 }
 
-interface FailureRecordInput {
+export interface FailureRecordInput {
   syncId: string;
   userId: string;
   direction: SyncDirection;
@@ -47,14 +47,22 @@ function normalizeOptional(value: string | null | undefined): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 
-function buildFailureDedupeKey(input: FailureRecordInput): string {
-  return [
-    input.syncId,
-    input.direction,
-    input.action,
-    normalizeOptional(input.sourceEventId) || '',
-    normalizeOptional(input.targetEventId) || '',
-  ].join(':');
+export function buildFailureDedupeKey(input: FailureRecordInput): string {
+  const sourceEventId = normalizeOptional(input.sourceEventId) || '';
+  const targetEventId = normalizeOptional(input.targetEventId) || '';
+  const parts = [input.syncId, input.direction, input.action, sourceEventId, targetEventId];
+
+  // With no event ids, distinct failures would otherwise collapse into a
+  // single record; discriminate by error identity instead. Event-scoped keys
+  // stay stable so resolveSyncFailureByContext keeps matching them.
+  if (!sourceEventId && !targetEventId) {
+    parts.push(
+      normalizeOptional(input.errorCode) ||
+        crypto.createHash('sha1').update(input.errorMessage).digest('hex').slice(0, 12)
+    );
+  }
+
+  return parts.join(':');
 }
 
 export async function recordSyncAudit(input: AuditRecordInput) {

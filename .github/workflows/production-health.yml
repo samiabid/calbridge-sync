@@ -1,0 +1,25 @@
+name: Production Health
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ready:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check production readiness
+        env:
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_BASE_URL:-}" ]; then
+            echo "APP_BASE_URL secret is required"
+            exit 1
+          fi
+          curl --fail --show-error --silent \
+            --max-time 30 \
+            --retry 2 \
+            --retry-all-errors \
+            "${APP_BASE_URL%/}/ready"

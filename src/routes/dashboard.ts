@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import { requireAuth } from '../middleware/auth';
 import { getSyncs } from '../services/sync';
-import { PrismaClient } from '@prisma/client';
 import { getOpenSyncFailures } from '../services/syncAudit';
 import { getWebhookRenewalStatus } from '../services/webhookRenewal';
+import { serializeJsonForScript } from '../utils/serializeForScript';
+import { prisma } from '../services/prisma';
+import { logError } from '../services/logger';
 
 const router = Router();
-const prisma = new PrismaClient();
 
 // Dashboard page
 router.get('/', requireAuth, async (req, res) => {
@@ -56,9 +57,13 @@ router.get('/', requireAuth, async (req, res) => {
       syncs,
       failedEvents,
       systemHealthSummary,
+      syncsJson: serializeJsonForScript(syncs),
+      systemHealthJson: serializeJsonForScript(systemHealthSummary),
     });
   } catch (error) {
-    console.error('Error loading dashboard:', error);
+    logError('dashboard_load_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     res.status(500).send('Error loading dashboard');
   }
 });

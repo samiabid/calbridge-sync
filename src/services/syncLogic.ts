@@ -26,6 +26,41 @@ export interface EventSkipReason {
   message: string;
 }
 
+export interface SyncLoopContext {
+  syncId: string;
+  targetCalendarId?: string;
+}
+
+function parseMetadataList(value: unknown): string[] {
+  if (typeof value !== 'string' || value.trim().length === 0) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((item): item is string => typeof item === 'string' && item.length > 0);
+    }
+  } catch {
+    // Legacy metadata may be a comma-separated string.
+  }
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+export function getEventSyncLineage(event: any): {
+  syncIds: string[];
+  calendarIds: string[];
+  isLegacyClone: boolean;
+} {
+  const metadata = event?.extendedProperties?.private || {};
+  const syncIds = parseMetadataList(metadata.syncLineage);
+  const calendarIds = parseMetadataList(metadata.calendarLineage);
+  const legacySyncId = typeof metadata.syncId === 'string' ? metadata.syncId : null;
+  if (legacySyncId && !syncIds.includes(legacySyncId)) syncIds.push(legacySyncId);
+  return {
+    syncIds,
+    calendarIds,
+    isLegacyClone: Boolean(legacySyncId && !metadata.syncLineage && !metadata.calendarLineage),
+  };
+}
+
 export interface CancellationState {
   cancelledEventIds: Set<string>;
 }
@@ -129,7 +164,8 @@ export function getFilterSkipReason(
   excludedColors: string[],
   excludedKeywords: string[],
   syncFreeEvents: boolean,
-  copyRsvpStatuses: string[]
+  copyRsvpStatuses: string[],
+  loopContext?: SyncLoopContext
 ): EventSkipReason | null {
   if (event.colorId && excludedColors.includes(event.colorId)) {
     return {
@@ -149,9 +185,25 @@ export function getFilterSkipReason(
   }
 
   if (event.extendedProperties?.private?.syncId) {
+    const lineage = getEventSyncLineage(event);
+    const repeatsCurrentSync = loopContext
+      ? lineage.syncIds.includes(loopContext.syncId)
+      : true;
+    const revisitsTarget = Boolean(
+      loopContext?.targetCalendarId && lineage.calendarIds.includes(loopContext.targetCalendarId)
+    );
+    // Old clones do not record visited calendars, so retain the conservative
+    // behavior until a normal update rewrites them with full lineage.
+    if (!repeatsCurrentSync && !revisitsTarget && !lineage.isLegacyClone) {
+      return null;
+    }
     return {
       code: 'loop_prevention',
-      message: 'Event was created by this sync and is ignored to prevent loops.',
+      message: repeatsCurrentSync
+        ? 'Event already passed through this sync and is ignored to prevent a loop.'
+        : revisitsTarget
+          ? 'Event already visited the destination calendar and is ignored to prevent a loop.'
+          : 'Legacy sync clone has no safe lineage metadata and is ignored to prevent a loop.',
     };
   }
 
@@ -179,7 +231,8 @@ export function shouldSkipEvent(
   excludedColors: string[],
   excludedKeywords: string[],
   syncFreeEvents: boolean,
-  copyRsvpStatuses: string[]
+  copyRsvpStatuses: string[],
+  loopContext?: SyncLoopContext
 ): boolean {
   return Boolean(
     getFilterSkipReason(
@@ -187,7 +240,8 @@ export function shouldSkipEvent(
       excludedColors,
       excludedKeywords,
       syncFreeEvents,
-      copyRsvpStatuses
+      copyRsvpStatuses,
+      loopContext
     )
   );
 }

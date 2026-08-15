@@ -36,6 +36,7 @@ async function invokeRoute(
   options: {
     headers?: Record<string, string>;
     body?: unknown;
+    session?: Record<string, unknown>;
   } = {}
 ) {
   const handler = findRouteHandler(router, method, path);
@@ -45,6 +46,7 @@ async function invokeRoute(
     url: path,
     headers: options.headers || {},
     body: options.body || {},
+    session: options.session,
   };
 
   const res: MockResponse = {
@@ -84,7 +86,7 @@ function restoreEnv(key: string, value: string | undefined) {
   }
 }
 
-test('health route returns metadata and renewal status', async () => {
+test('health route returns minimal liveness payload without metadata', async () => {
   const router = buildHealthRouter({
     getMetadata: () => ({
       service: 'calendar-sync-app',
@@ -110,9 +112,11 @@ test('health route returns metadata and renewal status', async () => {
 
   assert.equal(response.statusCode, 200);
   assert.equal(body.ok, true);
-  assert.equal(body.environment, 'test');
-  assert.equal(body.commit, 'abc123');
-  assert.equal(body.webhookRenewal.status, 'healthy');
+  assert.ok(body.timestamp);
+  assert.equal(body.environment, undefined);
+  assert.equal(body.commit, undefined);
+  assert.equal(body.version, undefined);
+  assert.equal(body.webhookRenewal, undefined);
 });
 
 test('ready route reports degraded status when database check fails', async () => {
@@ -163,10 +167,38 @@ test('ready route reports degraded status when database check fails', async () =
       lastError: null,
       lastRunSummary: null,
     }),
+    getMaintenanceStatus: () => ({
+      status: 'healthy',
+      intervalMs: 300_000,
+      scheduledAt: '2026-03-15T00:00:00.000Z',
+      lastStartedAt: null,
+      lastFinishedAt: null,
+      lastSucceededAt: null,
+      lastFailedAt: null,
+      lastError: null,
+      lastSummary: null,
+    }),
   });
 
   try {
-    const response = await invokeRoute(router, 'get', '/ready');
+    const anonymous = await invokeRoute(router, 'get', '/ready');
+    const anonymousBody = anonymous.payload as any;
+    assert.equal(anonymous.statusCode, 503);
+    assert.equal(anonymousBody.ok, false);
+    assert.equal(anonymousBody.checks, undefined);
+    assert.equal(anonymousBody.runtimeConfig, undefined);
+
+    const sessionResponse = await invokeRoute(router, 'get', '/ready', {
+      session: { userId: 'user-1' },
+    });
+    const sessionBody = sessionResponse.payload as any;
+    assert.equal(sessionResponse.statusCode, 503);
+    assert.equal(sessionBody.checks.database, false);
+    assert.ok(sessionBody.runtimeConfig);
+
+    const response = await invokeRoute(router, 'get', '/ready', {
+      headers: { authorization: 'Bearer token' },
+    });
     const body = response.payload as any;
 
     assert.equal(response.statusCode, 503);
@@ -237,17 +269,29 @@ test('ready route fails closed for missing critical production checks', async ()
       lastError: null,
       lastRunSummary: null,
     }),
+    getMaintenanceStatus: () => ({
+      status: 'healthy',
+      intervalMs: 300_000,
+      scheduledAt: '2026-03-15T00:00:00.000Z',
+      lastStartedAt: null,
+      lastFinishedAt: null,
+      lastSucceededAt: null,
+      lastFailedAt: null,
+      lastError: null,
+      lastSummary: null,
+    }),
   });
 
   try {
+    // INTERNAL_CRON_TOKEN is unset, so the body is redacted; the status code
+    // still fails closed.
     const response = await invokeRoute(router, 'get', '/ready');
     const body = response.payload as any;
 
     assert.equal(response.statusCode, 503);
     assert.equal(body.ok, false);
-    assert.equal(body.checks.database, true);
-    assert.equal(body.checks.tokenEncryptionConfigured, false);
-    assert.equal(body.checks.internalRenewalTokenConfigured, false);
+    assert.equal(body.checks, undefined);
+    assert.equal(body.runtimeConfig, undefined);
   } finally {
     restoreEnv('DATABASE_URL', originalDatabaseUrl);
     restoreEnv('SESSION_SECRET', originalSessionSecret);
@@ -301,6 +345,17 @@ test('ready route passes when all critical production checks are healthy', async
       lastFailedAt: null,
       lastError: null,
       lastRunSummary: null,
+    }),
+    getMaintenanceStatus: () => ({
+      status: 'healthy',
+      intervalMs: 300_000,
+      scheduledAt: '2026-03-15T00:00:00.000Z',
+      lastStartedAt: null,
+      lastFinishedAt: null,
+      lastSucceededAt: null,
+      lastFailedAt: null,
+      lastError: null,
+      lastSummary: null,
     }),
   });
 

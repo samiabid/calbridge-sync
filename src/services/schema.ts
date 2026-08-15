@@ -1,6 +1,7 @@
 
 import { prisma } from './prisma';
 import { logError } from './logger';
+import { sendAlert } from './alerts';
 
 export async function ensureSyncColumns() {
   try {
@@ -167,6 +168,9 @@ export async function ensureSyncColumns() {
       'CREATE INDEX IF NOT EXISTS "SyncEventAudit_targetEventId_idx" ON "SyncEventAudit"("targetEventId")'
     );
     await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "SyncEventAudit_createdAt_idx" ON "SyncEventAudit"("createdAt")'
+    );
+    await prisma.$executeRawUnsafe(
       'CREATE INDEX IF NOT EXISTS "SyncFailure_userId_status_lastFailedAt_idx" ON "SyncFailure"("userId", "status", "lastFailedAt")'
     );
     await prisma.$executeRawUnsafe(
@@ -178,6 +182,45 @@ export async function ensureSyncColumns() {
     await prisma.$executeRawUnsafe(
       'CREATE INDEX IF NOT EXISTS "SyncFailure_targetEventId_idx" ON "SyncFailure"("targetEventId")'
     );
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "OperationLease" (
+        "key" TEXT NOT NULL,
+        "holder" TEXT NOT NULL,
+        "expiresAt" TIMESTAMP NOT NULL,
+        "updatedAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT "OperationLease_pkey" PRIMARY KEY ("key")
+      )
+    `);
+    await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "OperationLease_expiresAt_idx" ON "OperationLease"("expiresAt")'
+    );
+
+    const duplicateMappings = await prisma.$queryRawUnsafe<Array<{ count: bigint }>>(`
+      SELECT COUNT(*)::bigint AS count
+      FROM (
+        SELECT "syncId", "sourceCalendarId", "sourceEventId"
+        FROM "SyncedEvent"
+        GROUP BY "syncId", "sourceCalendarId", "sourceEventId"
+        HAVING COUNT(*) > 1
+      ) duplicates
+    `);
+    const duplicateMappingCount = Number(duplicateMappings[0]?.count || 0);
+    if (duplicateMappingCount === 0) {
+      // Prisma's legacy db-push bootstrap does not track this operational
+      // invariant, so enforce it idempotently after the schema is available.
+      await prisma.$executeRawUnsafe(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "SyncedEvent_one_source_mapping_key" ON "SyncedEvent"("syncId", "sourceCalendarId", "sourceEventId")'
+      );
+    } else {
+      logError('schema_mapping_invariant_blocked_by_duplicates', { duplicateMappingCount });
+      await sendAlert({
+        severity: 'error',
+        key: 'mapping_invariant_blocked_by_duplicates',
+        message: 'Duplicate sync mappings prevent the source-mapping uniqueness invariant.',
+        details: { duplicateMappingCount },
+        cooldownMs: 6 * 60 * 60 * 1000,
+      });
+    }
   } catch (error) {
     logError('schema_ensure_columns_failed', {
       error: error instanceof Error ? error.message : String(error),

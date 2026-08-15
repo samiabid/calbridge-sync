@@ -805,6 +805,7 @@ async function processWebhookDirection(syncId: string, direction: SyncDirection)
       details: { syncId: sync.id, direction, error: message },
       cooldownMs: 30 * 60 * 1000,
     });
+    throw finalError;
   }
 }
 
@@ -813,15 +814,85 @@ async function enqueueWebhookDirection(syncId: string, direction: SyncDirection)
   return webhookRuns.run(key, () => processWebhookDirection(syncId, direction));
 }
 
-export async function runActiveSyncCatchup(): Promise<void> {
+export async function runSyncCatchup(syncId: string): Promise<ActiveSyncCatchupSummary> {
+  const sync = await prisma.sync.findUnique({
+    where: { id: syncId },
+    select: { id: true, isActive: true, isTwoWay: true },
+  });
+  if (!sync || !sync.isActive) {
+    throw new Error(`Sync ${syncId} is not active`);
+  }
+
+  const directions: SyncDirection[] = ['source_to_target'];
+  if (sync.isTwoWay) directions.push('target_to_source');
+  const summary: ActiveSyncCatchupSummary = {
+    attemptedDirections: 0,
+    succeededDirections: 0,
+    failedDirections: 0,
+  };
+  let lastError: unknown;
+  for (const direction of directions) {
+    summary.attemptedDirections += 1;
+    try {
+      await enqueueWebhookDirection(sync.id, direction);
+      summary.succeededDirections += 1;
+    } catch (error) {
+      lastError = error;
+      summary.failedDirections += 1;
+    }
+  }
+  if (summary.failedDirections > 0) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`${summary.failedDirections} catch-up direction(s) failed`);
+  }
+  return summary;
+}
+
+export interface ActiveSyncCatchupSummary {
+  attemptedDirections: number;
+  succeededDirections: number;
+  failedDirections: number;
+}
+
+export async function runActiveSyncCatchup(): Promise<ActiveSyncCatchupSummary> {
   const syncs = await prisma.sync.findMany({
     where: { isActive: true },
     select: { id: true, isTwoWay: true },
   });
+  const summary: ActiveSyncCatchupSummary = {
+    attemptedDirections: 0,
+    succeededDirections: 0,
+    failedDirections: 0,
+  };
   for (const sync of syncs) {
-    await enqueueWebhookDirection(sync.id, 'source_to_target');
-    if (sync.isTwoWay) await enqueueWebhookDirection(sync.id, 'target_to_source');
+    const directions: SyncDirection[] = ['source_to_target'];
+    if (sync.isTwoWay) directions.push('target_to_source');
+    for (const direction of directions) {
+      summary.attemptedDirections += 1;
+      try {
+        await enqueueWebhookDirection(sync.id, direction);
+        summary.succeededDirections += 1;
+      } catch (error) {
+        summary.failedDirections += 1;
+        logError('active_sync_catchup_direction_failed', {
+          syncId: sync.id,
+          direction,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
+  logInfo('active_sync_catchup_completed', {
+    attemptedDirections: summary.attemptedDirections,
+    succeededDirections: summary.succeededDirections,
+    failedDirections: summary.failedDirections,
+  });
+  return summary;
+}
+
+export function drainWebhookProcessing(timeoutMs: number = 10_000): Promise<boolean> {
+  return webhookRuns.drain(timeoutMs);
 }
 
 export async function handleWebhookNotification(channelId: string, resourceId: string) {

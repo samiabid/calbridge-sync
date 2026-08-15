@@ -179,6 +179,7 @@ model SyncEventAudit {
   @@index([userId, createdAt])
   @@index([sourceEventId])
   @@index([targetEventId])
+  @@index([createdAt])
 }
 
 model SyncFailure {
@@ -220,4 +221,21 @@ model Session {
   expire DateTime
 
   @@index([expire])
+}
+
+model OperationLease {
+  key       String   @id
+  holder    String
+  expiresAt DateTime
+  updatedAt DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+model AppMigration {
+  id        String   @id
+  checksum  String
+  appliedAt DateTime @default(now())
+
+  @@map("_AppMigration")
 }

@@ -1,3 +1,5 @@
+import { getRequestContext } from './requestContext';
+
 type LogLevel = 'info' | 'warn' | 'error';
 
 type LogFieldValue = string | number | boolean | null | undefined;
@@ -18,6 +20,7 @@ function writeLog(level: LogLevel, message: string, fields?: LogFields) {
     level,
     message,
     timestamp: new Date().toISOString(),
+    ...(getRequestContext() || {}),
     ...(sanitizeFields(fields) || {}),
   };
 

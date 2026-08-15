@@ -4,6 +4,8 @@ const path = require('path');
 
 const maxAttempts = parseInt(process.env.DB_MIGRATE_MAX_ATTEMPTS || '12', 10);
 const delayMs = parseInt(process.env.DB_MIGRATE_DELAY_MS || '5000', 10);
+// Per-attempt timeout: a hung db push otherwise blocks the deploy forever.
+const attemptTimeoutMs = parseInt(process.env.DB_MIGRATE_ATTEMPT_TIMEOUT_MS || '120000', 10);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -31,7 +33,12 @@ async function run() {
       execFileSync(
         './node_modules/.bin/prisma',
         prismaCommand,
-        { stdio: 'inherit' }
+        { stdio: 'inherit', timeout: attemptTimeoutMs, killSignal: 'SIGKILL' }
+      );
+      execFileSync(
+        process.execPath,
+        ['scripts/run-app-migrations.js'],
+        { stdio: 'inherit', timeout: attemptTimeoutMs, killSignal: 'SIGKILL' }
       );
       console.log('DB migrate succeeded.');
       return;

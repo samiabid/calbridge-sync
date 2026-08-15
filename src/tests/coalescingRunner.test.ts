@@ -22,3 +22,17 @@ test('notifications received during a run are coalesced into one follow-up pass'
 
   assert.equal(runs, 2);
 });
+
+test('drain waits for active webhook work and reports a timeout safely', async () => {
+  const runner = new CoalescingRunner();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const run = runner.run('sync:source', () => gate);
+
+  assert.equal(await runner.drain(5), false);
+  release();
+  await run;
+  assert.equal(await runner.drain(50), true);
+});

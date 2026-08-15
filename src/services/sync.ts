@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { getAuthenticatedCalendar } from './calendar';
-import { setupWebhook, stopWebhook } from './webhook';
+import { runSyncCatchup, setupWebhook, stopWebhook } from './webhook';
 import { isRateLimitError, sleepMs, withRateLimitRetry } from './rateLimit';
 import { getSyncFutureWindowEnd, normalizeSyncFutureDays } from './syncWindow';
 import {
@@ -14,13 +14,13 @@ import { logError, logInfo, logWarn } from './logger';
 import {
   ALLOWED_RSVP_STATUSES,
   eventHasAnyCopyableDetails,
+  getFilterSkipReason,
   getEventSelfResponseStatus,
   getRecurringSeriesIdFromEventId,
   isDetailPlaceholderSummary,
   needsReadableSourceDetails,
   normalizeRsvpStatuses,
   shouldAttemptAccountDetection,
-  shouldSkipEvent,
 } from './syncLogic';
 import { buildTargetEventRequestBody } from './syncEventPayload';
 import { prisma } from './prisma';
@@ -35,6 +35,10 @@ import {
   type BackfillDirectionContext,
 } from './backfillLogic';
 import { getRecurrenceIdentity } from './recurrenceLogic';
+import {
+  HEAVY_CALENDAR_OPERATION_LEASE,
+  withOperationLease,
+} from './operationLease';
 
 const MAX_INVALID_GRANT_FAILURES = 200;
 const INITIAL_SYNC_PAST_MONTHS = 2;
@@ -373,14 +377,14 @@ async function acquireBackfillRun(syncId: string, userId: string) {
       userId,
       isActive: true,
       OR: [
-        { backfillStatus: { not: 'running' } },
+        { backfillStatus: { notIn: ['running', 'queued'] } },
         { backfillStartedAt: null },
         { backfillStartedAt: { lt: staleBefore } },
       ],
     },
     data: {
       backfillRunId: runId,
-      backfillStatus: 'running',
+      backfillStatus: 'queued',
       backfillStartedAt: now,
       backfillCompletedAt: null,
       backfillLastError: null,
@@ -443,12 +447,33 @@ async function startInitialBackfillInBackground(
   });
   void (async () => {
     try {
-      const summary = await performInitialSync(
-        syncId,
-        userId,
-        sourceAccountId,
-        targetAccountId,
-        'past_3mo_recurring'
+      const summary = await withOperationLease(
+        HEAVY_CALENDAR_OPERATION_LEASE,
+        async () => {
+          const claimed = await prisma.sync.updateMany({
+            where: { id: syncId, backfillRunId: runId, backfillStatus: 'queued' },
+            data: { backfillStatus: 'running', backfillStartedAt: new Date() },
+          });
+          if (claimed.count === 0) {
+            const error = new Error('Backfill run was superseded before execution') as Error & {
+              code: string;
+            };
+            error.code = 'BACKFILL_RUN_SUPERSEDED';
+            throw error;
+          }
+          return performInitialSync(
+            syncId,
+            userId,
+            sourceAccountId,
+            targetAccountId,
+            'past_3mo_recurring'
+          );
+        },
+        {
+          wait: true,
+          waitTimeoutMs: BACKFILL_STALE_AFTER_MS,
+          holder: `backfill:${runId}`,
+        }
       );
       await completeBackfillRun(syncId, runId, summary);
       logInfo('initial_backfill_run_completed', {
@@ -487,7 +512,7 @@ async function startInitialBackfillInBackground(
     }
   })();
 
-  return { runId, status: 'running' as const, startedAt };
+  return { runId, status: 'queued' as const, startedAt };
 }
 
 export async function createSync(params: CreateSyncParams) {
@@ -707,6 +732,108 @@ export async function rerunMissedBackfill(syncId: string, userId: string) {
   const sourceAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
   const targetAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
   return startInitialBackfillInBackground(sync.id, userId, sourceAccountId, targetAccountId);
+}
+
+async function stopStoredWebhookChannels(sync: any) {
+  const channels = [
+    {
+      type: 'source',
+      accountId: sync.sourceGoogleAccountId || sync.googleAccountId,
+      channelId: sync.sourceChannelId,
+      resourceId: sync.sourceResourceId,
+    },
+    {
+      type: 'target',
+      accountId: sync.targetGoogleAccountId || sync.googleAccountId,
+      channelId: sync.targetChannelId,
+      resourceId: sync.targetResourceId,
+    },
+  ];
+  for (const channel of channels) {
+    if (!channel.channelId || !channel.resourceId) continue;
+    try {
+      await stopWebhook(sync.userId, channel.accountId, channel.channelId, channel.resourceId);
+    } catch (error) {
+      logWarn('sync_toggle_webhook_stop_failed', {
+        syncId: sync.id,
+        type: channel.type,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+export async function setSyncActiveStatus(syncId: string, userId: string, isActive: boolean) {
+  const sync = await prisma.sync.findFirst({ where: { id: syncId, userId } });
+  if (!sync) throw new Error('Sync not found');
+  if (sync.isActive === isActive) return sync;
+
+  if (!isActive) {
+    // Make notifications inert before stopping channels. Failed channel stops
+    // then become harmless and are not allowed to block pausing.
+    await prisma.sync.update({
+      where: { id: sync.id },
+      data: { isActive: false, lastSyncStatus: 'paused', lastSyncError: null },
+    });
+    await stopStoredWebhookChannels(sync);
+    return prisma.sync.update({
+      where: { id: sync.id },
+      data: {
+        sourceChannelId: null,
+        sourceResourceId: null,
+        sourceExpiration: null,
+        targetChannelId: null,
+        targetResourceId: null,
+        targetExpiration: null,
+      },
+    });
+  }
+
+  // Inactive syncs may have stale channels from an older deployment or an
+  // automatic token pause. Replace them before running an immediate catch-up.
+  await stopStoredWebhookChannels(sync);
+  const activated = await prisma.sync.update({
+    where: { id: sync.id },
+    data: {
+      isActive: true,
+      lastSyncStatus: 'catching_up',
+      lastSyncError: null,
+      accountDetectionAttempts: 0,
+      invalidGrantFailures: 0,
+      sourceChannelId: null,
+      sourceResourceId: null,
+      sourceExpiration: null,
+      targetChannelId: null,
+      targetResourceId: null,
+      targetExpiration: null,
+    },
+  });
+
+  try {
+    const sourceAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
+    const targetAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
+    await setupWebhook(sync.id, userId, sourceAccountId, sync.sourceCalendarId, 'source');
+    if (sync.isTwoWay) {
+      await setupWebhook(sync.id, userId, targetAccountId, sync.targetCalendarId, 'target');
+    }
+    await runSyncCatchup(sync.id);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await prisma.sync.updateMany({
+      where: { id: sync.id },
+      data: { lastSyncStatus: 'error', lastSyncError: message.slice(0, 1000) },
+    });
+    logError('sync_resume_setup_or_catchup_failed', { syncId: sync.id, error: message });
+    await sendAlert({
+      severity: 'error',
+      key: `sync_resume_failed:${sync.id}`,
+      message: `Sync ${sync.id} resumed but needs automatic webhook or catch-up recovery.`,
+      details: { syncId: sync.id, error: message },
+      cooldownMs: 30 * 60 * 1000,
+    });
+  }
+
+  return prisma.sync.findUnique({ where: { id: activated.id } });
 }
 
 export async function deleteSync(
@@ -1363,6 +1490,17 @@ export async function syncEvent(
     copySettings
   );
 
+  // Resolve ownership before filters. If an event becomes permanently
+  // excluded, its app-owned clone must be removed rather than left stale.
+  const existingSync = await prisma.syncedEvent.findFirst({
+    where: {
+      syncId,
+      sourceEventId: event.id,
+      sourceCalendarId,
+    },
+    orderBy: [{ lastSyncedAt: 'desc' }, { createdAt: 'desc' }],
+  });
+
   if (needsReadableSourceDetails(copySettings) && !eventHasAnyCopyableDetails(event)) {
     logWarn('sync_event_skipped_no_readable_details', {
       syncId,
@@ -1387,53 +1525,86 @@ export async function syncEvent(
     };
   }
 
-  if (
-    shouldSkipEvent(
-      event,
-      syncRecord.excludedColors,
-      syncRecord.excludedKeywords,
-      copySettings.syncFreeEvents,
-      copySettings.copyRsvpStatuses
-    )
-  ) {
+  const filterReason = getFilterSkipReason(
+    event,
+    syncRecord.excludedColors,
+    syncRecord.excludedKeywords,
+    copySettings.syncFreeEvents,
+    copySettings.copyRsvpStatuses,
+    { syncId, targetCalendarId }
+  );
+  if (filterReason) {
     logInfo('sync_event_skipped_filtered', {
       syncId,
       eventId: event.id,
       eventSummary: event.summary || null,
+      reasonCode: filterReason.code,
     });
+
+    if (existingSync) {
+      try {
+        await withRateLimitRetry(
+          () =>
+            calendar!.events.delete({
+              calendarId: existingSync.targetCalendarId,
+              eventId: existingSync.targetEventId,
+            }),
+          `deleting filtered target event ${existingSync.targetEventId} for sync ${syncId}`
+        );
+      } catch (error: any) {
+        const status = getErrorStatus(error);
+        if (status !== 404 && status !== 410) {
+          await recordSyncFailure({
+            syncId,
+            userId,
+            direction,
+            action: 'delete',
+            sourceEventId: event.id,
+            sourceCalendarId,
+            targetEventId: existingSync.targetEventId,
+            targetCalendarId: existingSync.targetCalendarId,
+            eventSummary: event.summary || null,
+            errorCode: getErrorCode(error),
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+          throw error;
+        }
+      }
+      await prisma.syncedEvent.deleteMany({
+        where: { syncId, sourceEventId: event.id, sourceCalendarId },
+      });
+    }
+
     await recordSyncAudit({
       syncId,
       userId,
       direction,
-      action: 'skip',
+      action: existingSync ? 'delete' : 'skip',
       result: 'skipped',
       sourceEventId: event.id,
       sourceCalendarId,
+      targetEventId: existingSync?.targetEventId || null,
+      targetCalendarId: existingSync?.targetCalendarId || targetCalendarId,
       eventSummary: event.summary || null,
-      reasonCode: 'filtered',
-      reasonMessage: 'Event skipped by sync filters',
+      reasonCode: filterReason.code,
+      reasonMessage: existingSync
+        ? `${filterReason.message} Existing app-owned clone was removed.`
+        : filterReason.message,
     });
     return {
       status: 'skipped',
-      reasonCode: 'filtered',
-      reasonMessage: 'Event skipped by sync filters',
+      reasonCode: filterReason.code,
+      reasonMessage: filterReason.message,
     };
   }
-
-  // Check if event is already synced
-  const existingSync = await prisma.syncedEvent.findFirst({
-    where: {
-      syncId,
-      sourceEventId: event.id,
-      sourceCalendarId,
-    },
-    orderBy: [{ lastSyncedAt: 'desc' }, { createdAt: 'desc' }],
-  });
 
   if (existingSync) {
     // Update existing synced event
     try {
-      const requestBody = buildTargetEventRequestBody(syncId, event, copySettings);
+      const requestBody = buildTargetEventRequestBody(syncId, event, copySettings, {
+        sourceCalendarId,
+        targetCalendarId,
+      });
       await withRateLimitRetry(
         () =>
           calendar.events.update({
@@ -1773,7 +1944,10 @@ async function createSyncedEvent(
       targetCalendarId
     );
     const requestBody = {
-      ...buildTargetEventRequestBody(syncId, event, normalizedSettings),
+      ...buildTargetEventRequestBody(syncId, event, normalizedSettings, {
+        sourceCalendarId,
+        targetCalendarId,
+      }),
       id: targetEventId,
     };
 

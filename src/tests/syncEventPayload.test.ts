@@ -145,6 +145,34 @@ test('target payload preserves event fields and sync metadata for create and upd
   assert.deepEqual(body.extendedProperties.private, {
     syncId: 'sync-1',
     originalEventId: 'source-event-1',
+    syncLineage: '["sync-1"]',
+  });
+});
+
+test('target payload extends sync and calendar lineage without losing the root event id', () => {
+  const body = buildTargetEventRequestBody(
+    'sync-2',
+    {
+      ...sourceEvent,
+      id: 'clone-event-1',
+      extendedProperties: {
+        private: {
+          syncId: 'sync-1',
+          originalEventId: 'root-event-1',
+          syncLineage: '["sync-1"]',
+          calendarLineage: '["calendar-a","calendar-b"]',
+        },
+      },
+    },
+    settings(),
+    { sourceCalendarId: 'calendar-b', targetCalendarId: 'calendar-c' }
+  );
+
+  assert.deepEqual(body.extendedProperties.private, {
+    syncId: 'sync-2',
+    originalEventId: 'root-event-1',
+    syncLineage: '["sync-1","sync-2"]',
+    calendarLineage: '["calendar-a","calendar-b","calendar-c"]',
   });
 });
 

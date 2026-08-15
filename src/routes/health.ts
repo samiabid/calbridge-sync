@@ -1,11 +1,13 @@
 import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
 import packageJson from '../../package.json';
 import { getPublicBaseUrl, getRuntimeConfigSummary } from '../config/runtime';
 import { isTokenEncryptionEnabled } from '../services/tokenCrypto';
 import { getWebhookRenewalStatus } from '../services/webhookRenewal';
+import { hasValidInternalToken } from '../utils/security';
+import { prisma } from '../services/prisma';
+import { getSyncMaintenanceStatus } from '../services/syncMaintenance';
+import { getSyncCanaryStatus } from '../services/syncCanary';
 
-const prisma = new PrismaClient();
 
 function getAppMetadata() {
   return {
@@ -26,6 +28,7 @@ interface HealthRouteDeps {
   getRuntimeConfig?: () => ReturnType<typeof getRuntimeConfigSummary>;
   isTokenEncryptionReady?: () => boolean;
   getRenewalStatus?: typeof getWebhookRenewalStatus;
+  getMaintenanceStatus?: typeof getSyncMaintenanceStatus;
   getMetadata?: () => ReturnType<typeof getAppMetadata>;
 }
 
@@ -40,21 +43,23 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
   const getRuntimeConfig = deps.getRuntimeConfig || getRuntimeConfigSummary;
   const isTokenEncryptionReady = deps.isTokenEncryptionReady || isTokenEncryptionEnabled;
   const getRenewalStatus = deps.getRenewalStatus || getWebhookRenewalStatus;
+  const getMaintenanceStatus = deps.getMaintenanceStatus || getSyncMaintenanceStatus;
   const getMetadata = deps.getMetadata || getAppMetadata;
 
+  // Unauthenticated liveness probe: no version/commit/environment details.
   router.get('/health', (_req, res) => {
     res.json({
       ok: true,
-      ...getMetadata(),
       timestamp: new Date().toISOString(),
-      webhookRenewal: getRenewalStatus(),
     });
   });
 
-  router.get('/ready', async (_req, res) => {
+  router.get('/ready', async (req, res) => {
     const timestamp = new Date().toISOString();
     const metadata = getMetadata();
     const runtimeConfig = getRuntimeConfig();
+    const webhookRenewal = getRenewalStatus();
+    const syncMaintenance = getMaintenanceStatus();
     const isProduction = metadata.environment === 'production';
     const checks = {
       database: false,
@@ -70,7 +75,8 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
         runtimeConfig.accessControl.connectedAccountAllowlistConfigured,
       internalRenewalTokenConfigured: Boolean(process.env.INTERNAL_CRON_TOKEN),
       alertWebhookConfigured: Boolean(process.env.ALERT_WEBHOOK_URL),
-      webhookRenewalScheduled: getRenewalStatus().status !== 'not_scheduled',
+      webhookRenewalScheduled: webhookRenewal.status !== 'not_scheduled',
+      syncMaintenanceScheduled: syncMaintenance.status !== 'not_scheduled',
     };
 
     let databaseError: string | null = null;
@@ -82,7 +88,6 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       databaseError = error instanceof Error ? error.message : String(error);
     }
 
-    const webhookRenewal = getRenewalStatus();
     const productionChecksHealthy =
       !isProduction ||
       (checks.tokenEncryptionConfigured &&
@@ -98,8 +103,20 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       checks.database &&
       checks.sessionConfigured &&
       checks.webhookRenewalScheduled &&
+      checks.syncMaintenanceScheduled &&
       productionChecksHealthy &&
-      webhookRenewal.status !== 'error';
+      webhookRenewal.status !== 'error' &&
+      syncMaintenance.status !== 'error';
+
+    // Full diagnostics for the internal cron token or a logged-in session
+    // (the dashboard's readiness card fetches /ready from the browser);
+    // Railway healthchecks and anonymous callers get the status code plus a
+    // minimal body.
+    const isLoggedInSession = Boolean((req as any).session?.userId);
+    if (!isLoggedInSession && !hasValidInternalToken(req, process.env.INTERNAL_CRON_TOKEN)) {
+      res.status(ok ? 200 : 503).json({ ok, timestamp });
+      return;
+    }
 
     res.status(ok ? 200 : 503).json({
       ok,
@@ -109,6 +126,8 @@ export function buildHealthRouter(deps: HealthRouteDeps = {}) {
       runtimeConfig,
       databaseError,
       webhookRenewal,
+      syncMaintenance,
+      syncCanary: getSyncCanaryStatus(),
     });
   });
 

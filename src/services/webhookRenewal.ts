@@ -42,33 +42,35 @@ export function getWebhookRenewalStatus(): WebhookRenewalStatus {
   return { ...webhookRenewalStatus };
 }
 
-function schedulePostRenewalMaintenance() {
-  void Promise.all([import('./webhook'), import('./sync')])
-    .then(async ([{ runActiveSyncCatchup }, { runRecurrenceHorizonMaintenance }]) => {
-      await runActiveSyncCatchup();
-      const horizonSummary = await runRecurrenceHorizonMaintenance();
-      logInfo('post_renewal_sync_maintenance_completed', {
-        ...horizonSummary,
-      });
-      if (horizonSummary.failedDirections > 0) {
-        await sendAlert({
-          severity: 'warn',
-          key: 'recurrence_horizon_maintenance_partial_failure',
-          message: 'Recurring-event horizon maintenance completed with failures.',
-          details: {
-            checkedDirections: horizonSummary.checkedDirections,
-            extendedDirections: horizonSummary.extendedDirections,
-            failedDirections: horizonSummary.failedDirections,
-          },
-          cooldownMs: 6 * 60 * 60 * 1000,
-        });
-      }
-    })
-    .catch((error) => {
-      logError('post_renewal_sync_maintenance_failed', {
-        error: error instanceof Error ? error.message : String(error),
-      });
+async function runPostRenewalMaintenance() {
+  const [{ runActiveSyncCatchup }, { runRecurrenceHorizonMaintenance }] = await Promise.all([
+    import('./webhook'),
+    import('./sync'),
+  ]);
+  const catchupSummary = await runActiveSyncCatchup();
+  const horizonSummary = await runRecurrenceHorizonMaintenance();
+  logInfo('post_renewal_sync_maintenance_completed', {
+    catchupFailedDirections: catchupSummary.failedDirections,
+    ...horizonSummary,
+  });
+  if (catchupSummary.failedDirections > 0 || horizonSummary.failedDirections > 0) {
+    await sendAlert({
+      severity: 'error',
+      key: 'post_renewal_sync_maintenance_partial_failure',
+      message: 'Post-renewal calendar maintenance completed with failures.',
+      details: {
+        catchupFailedDirections: catchupSummary.failedDirections,
+        checkedDirections: horizonSummary.checkedDirections,
+        extendedDirections: horizonSummary.extendedDirections,
+        horizonFailedDirections: horizonSummary.failedDirections,
+      },
+      cooldownMs: 60 * 60 * 1000,
     });
+    throw new Error(
+      `Post-renewal maintenance failed: catchup=${catchupSummary.failedDirections}, horizon=${horizonSummary.failedDirections}`
+    );
+  }
+  return { catchupSummary, horizonSummary };
 }
 
 export async function runWebhookRenewalCheck(options: { force?: boolean } = {}) {
@@ -227,7 +229,6 @@ export async function runWebhookRenewalCheck(options: { force?: boolean } = {}) 
       failedCount,
       status: webhookRenewalStatus.status,
     });
-    schedulePostRenewalMaintenance();
     if (failedCount > 0) {
       await sendAlert({
         severity: 'error',
@@ -240,7 +241,10 @@ export async function runWebhookRenewalCheck(options: { force?: boolean } = {}) 
         },
         cooldownMs: 60 * 60 * 1000,
       });
+      throw new Error(`${failedCount} sync renewal(s) failed`);
     }
+    const maintenance = await runPostRenewalMaintenance();
+    return { expiringSyncs: syncs.length, renewedCount, failedCount, maintenance };
   } catch (error: any) {
     const finishedAt = new Date();
     const message = error instanceof Error ? error.message : String(error);
@@ -263,6 +267,7 @@ export async function runWebhookRenewalCheck(options: { force?: boolean } = {}) 
       },
       cooldownMs: 60 * 60 * 1000,
     });
+    throw error;
   }
 }
 
@@ -277,7 +282,11 @@ export function setupWebhookRenewal() {
   });
 
   scheduledRenewalTask = cron.schedule(WEBHOOK_RENEWAL_SCHEDULE, async () => {
-    await runWebhookRenewalCheck();
+    await runWebhookRenewalCheck().catch((error) => {
+      logError('webhook_renewal_scheduled_run_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   });
 
   logInfo('webhook_renewal_scheduled', {
