@@ -1,7 +1,6 @@
-import { PrismaClient } from '@prisma/client';
 import { getAuthenticatedCalendar } from './calendar';
+import { prisma } from './prisma';
 
-const prisma = new PrismaClient();
 
 interface DiagnosticsDeps {
   prisma?: any;
@@ -24,6 +23,12 @@ export interface ProductionDiagnosticsResult {
     calendarId: string;
     issue: 'missing_channel' | 'missing_resource' | 'missing_expiration' | 'expired';
     expiration: string | null;
+  }>;
+  incrementalSyncIssues: Array<{
+    syncId: string;
+    direction: 'source' | 'target';
+    issue: 'missing_sync_token' | 'expired_recurrence_horizon';
+    recurrenceHorizon: string | null;
   }>;
   openFailures: {
     count: number;
@@ -155,6 +160,64 @@ export function buildProductionDiagnosticsService(deps: DiagnosticsDeps = {}) {
     return issues;
   }
 
+  async function getIncrementalSyncIssues(
+    userId: string,
+    now: Date
+  ): Promise<ProductionDiagnosticsResult['incrementalSyncIssues']> {
+    const syncs = await prismaClient.sync.findMany({
+      where: { userId, isActive: true },
+      select: {
+        id: true,
+        isTwoWay: true,
+        sourceSyncToken: true,
+        targetSyncToken: true,
+        sourceRecurrenceHorizon: true,
+        targetRecurrenceHorizon: true,
+      },
+    });
+    const issues: ProductionDiagnosticsResult['incrementalSyncIssues'] = [];
+    for (const sync of syncs) {
+      const directions: Array<{
+        direction: 'source' | 'target';
+        token: string | null;
+        horizon: Date | null;
+      }> = [
+        {
+          direction: 'source',
+          token: sync.sourceSyncToken,
+          horizon: sync.sourceRecurrenceHorizon,
+        },
+      ];
+      if (sync.isTwoWay) {
+        directions.push({
+          direction: 'target',
+          token: sync.targetSyncToken,
+          horizon: sync.targetRecurrenceHorizon,
+        });
+      }
+      for (const item of directions) {
+        const horizon = toIso(item.horizon);
+        if (!item.token) {
+          issues.push({
+            syncId: sync.id,
+            direction: item.direction,
+            issue: 'missing_sync_token',
+            recurrenceHorizon: horizon,
+          });
+        }
+        if (item.horizon && item.horizon < now) {
+          issues.push({
+            syncId: sync.id,
+            direction: item.direction,
+            issue: 'expired_recurrence_horizon',
+            recurrenceHorizon: horizon,
+          });
+        }
+      }
+    }
+    return issues;
+  }
+
   async function getOpenFailures(userId: string): Promise<ProductionDiagnosticsResult['openFailures']> {
     const [count, recent] = await Promise.all([
       prismaClient.syncFailure.count({ where: { userId, status: 'open' } }),
@@ -217,9 +280,10 @@ export function buildProductionDiagnosticsService(deps: DiagnosticsDeps = {}) {
 
   async function getProductionDiagnostics(userId: string): Promise<ProductionDiagnosticsResult> {
     const now = getNow();
-    const [duplicateMappings, webhookIssues, openFailures, accountIssues] = await Promise.all([
+    const [duplicateMappings, webhookIssues, incrementalSyncIssues, openFailures, accountIssues] = await Promise.all([
       getDuplicateMappings(userId),
       getWebhookIssues(userId, now),
+      getIncrementalSyncIssues(userId, now),
       getOpenFailures(userId),
       getAccountIssues(userId),
     ]);
@@ -228,6 +292,7 @@ export function buildProductionDiagnosticsService(deps: DiagnosticsDeps = {}) {
       generatedAt: now.toISOString(),
       duplicateMappings,
       webhookIssues,
+      incrementalSyncIssues,
       openFailures,
       accountIssues,
     };

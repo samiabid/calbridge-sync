@@ -42,6 +42,10 @@ test('production diagnostics reports duplicate mappings, webhook issues, failure
             targetChannelId: 'target-channel',
             targetResourceId: 'target-resource',
             targetExpiration: new Date('2026-06-02T10:00:00.000Z'),
+            sourceSyncToken: null,
+            targetSyncToken: 'target-token',
+            sourceRecurrenceHorizon: new Date('2026-06-01T00:00:00.000Z'),
+            targetRecurrenceHorizon: new Date('2027-06-01T00:00:00.000Z'),
           },
         ],
       },
@@ -89,6 +93,10 @@ test('production diagnostics reports duplicate mappings, webhook issues, failure
   assert.deepEqual(
     result.webhookIssues.map((issue) => issue.issue).sort(),
     ['expired', 'missing_channel', 'missing_expiration']
+  );
+  assert.deepEqual(
+    result.incrementalSyncIssues.map((issue) => issue.issue).sort(),
+    ['expired_recurrence_horizon', 'missing_sync_token']
   );
   assert.equal(result.openFailures.count, 1);
   assert.equal(result.openFailures.recent[0].lastFailedAt, '2026-06-02T11:00:00.000Z');

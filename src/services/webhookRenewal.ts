@@ -1,10 +1,9 @@
 import cron from 'node-cron';
-import { PrismaClient } from '@prisma/client';
 import { setupWebhook, stopWebhook } from './webhook';
 import { sendAlert } from './alerts';
 import { logError, logInfo } from './logger';
+import { prisma } from './prisma';
 
-const prisma = new PrismaClient();
 const WEBHOOK_RENEWAL_SCHEDULE = '0 2 * * *';
 
 type WebhookRenewalState = 'not_scheduled' | 'scheduled' | 'running' | 'healthy' | 'error';
@@ -43,7 +42,37 @@ export function getWebhookRenewalStatus(): WebhookRenewalStatus {
   return { ...webhookRenewalStatus };
 }
 
-export async function runWebhookRenewalCheck() {
+function schedulePostRenewalMaintenance() {
+  void Promise.all([import('./webhook'), import('./sync')])
+    .then(async ([{ runActiveSyncCatchup }, { runRecurrenceHorizonMaintenance }]) => {
+      await runActiveSyncCatchup();
+      const horizonSummary = await runRecurrenceHorizonMaintenance();
+      logInfo('post_renewal_sync_maintenance_completed', {
+        ...horizonSummary,
+      });
+      if (horizonSummary.failedDirections > 0) {
+        await sendAlert({
+          severity: 'warn',
+          key: 'recurrence_horizon_maintenance_partial_failure',
+          message: 'Recurring-event horizon maintenance completed with failures.',
+          details: {
+            checkedDirections: horizonSummary.checkedDirections,
+            extendedDirections: horizonSummary.extendedDirections,
+            failedDirections: horizonSummary.failedDirections,
+          },
+          cooldownMs: 6 * 60 * 60 * 1000,
+        });
+      }
+    })
+    .catch((error) => {
+      logError('post_renewal_sync_maintenance_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+}
+
+export async function runWebhookRenewalCheck(options: { force?: boolean } = {}) {
+  const force = Boolean(options.force);
   const startedAt = new Date();
   setWebhookRenewalStatus({
     status: 'running',
@@ -52,6 +81,7 @@ export async function runWebhookRenewalCheck() {
   });
   logInfo('webhook_renewal_started', {
     startedAt: startedAt.toISOString(),
+    force,
   });
 
   try {
@@ -60,28 +90,30 @@ export async function runWebhookRenewalCheck() {
     expiringDate.setDate(expiringDate.getDate() + 2);
 
     const syncs = await prisma.sync.findMany({
-      where: {
-        isActive: true,
-        OR: [
-          { sourceChannelId: null },
-          { sourceResourceId: null },
-          { sourceExpiration: null },
-          {
-            sourceExpiration: {
-              lte: expiringDate,
-            },
+      where: force
+        ? { isActive: true }
+        : {
+            isActive: true,
+            OR: [
+              { sourceChannelId: null },
+              { sourceResourceId: null },
+              { sourceExpiration: null },
+              {
+                sourceExpiration: {
+                  lte: expiringDate,
+                },
+              },
+              { isTwoWay: true, targetChannelId: null },
+              { isTwoWay: true, targetResourceId: null },
+              { isTwoWay: true, targetExpiration: null },
+              {
+                isTwoWay: true,
+                targetExpiration: {
+                  lte: expiringDate,
+                },
+              },
+            ],
           },
-          { isTwoWay: true, targetChannelId: null },
-          { isTwoWay: true, targetResourceId: null },
-          { isTwoWay: true, targetExpiration: null },
-          {
-            isTwoWay: true,
-            targetExpiration: {
-              lte: expiringDate,
-            },
-          },
-        ],
-      },
     });
 
     logInfo('webhook_renewal_expiring_syncs_loaded', {
@@ -95,6 +127,7 @@ export async function runWebhookRenewalCheck() {
       try {
         // Renew source webhook
         const shouldRenewSource =
+          force ||
           !sync.sourceChannelId ||
           !sync.sourceResourceId ||
           !sync.sourceExpiration ||
@@ -134,7 +167,8 @@ export async function runWebhookRenewalCheck() {
         // Renew target webhook if two-way sync
         const shouldRenewTarget =
           sync.isTwoWay &&
-          (!sync.targetChannelId ||
+          (force ||
+            !sync.targetChannelId ||
             !sync.targetResourceId ||
             !sync.targetExpiration ||
             sync.targetExpiration <= expiringDate);
@@ -193,6 +227,7 @@ export async function runWebhookRenewalCheck() {
       failedCount,
       status: webhookRenewalStatus.status,
     });
+    schedulePostRenewalMaintenance();
     if (failedCount > 0) {
       await sendAlert({
         severity: 'error',
@@ -231,6 +266,8 @@ export async function runWebhookRenewalCheck() {
   }
 }
 
+let scheduledRenewalTask: cron.ScheduledTask | null = null;
+
 export function setupWebhookRenewal() {
   setWebhookRenewalStatus({
     status: 'scheduled',
@@ -239,11 +276,16 @@ export function setupWebhookRenewal() {
     lastRunSummary: null,
   });
 
-  cron.schedule(WEBHOOK_RENEWAL_SCHEDULE, async () => {
+  scheduledRenewalTask = cron.schedule(WEBHOOK_RENEWAL_SCHEDULE, async () => {
     await runWebhookRenewalCheck();
   });
 
   logInfo('webhook_renewal_scheduled', {
     schedule: WEBHOOK_RENEWAL_SCHEDULE,
   });
+}
+
+export function stopWebhookRenewal() {
+  scheduledRenewalTask?.stop();
+  scheduledRenewalTask = null;
 }

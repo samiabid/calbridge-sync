@@ -11,6 +11,18 @@ export async function ensureSyncColumns() {
       'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "targetUpdatedMin" TIMESTAMP'
     );
     await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "sourceSyncToken" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "targetSyncToken" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "sourceRecurrenceHorizon" TIMESTAMP'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "targetRecurrenceHorizon" TIMESTAMP'
+    );
+    await prisma.$executeRawUnsafe(
       'ALTER TABLE "Sync" ADD COLUMN IF NOT EXISTS "invalidGrantFailures" INTEGER NOT NULL DEFAULT 0'
     );
     await prisma.$executeRawUnsafe(
@@ -78,6 +90,15 @@ export async function ensureSyncColumns() {
     );
     await prisma.$executeRawUnsafe(
       'CREATE INDEX IF NOT EXISTS "Sync_targetChannelId_idx" ON "Sync"("targetChannelId")'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "SyncedEvent" ADD COLUMN IF NOT EXISTS "sourceRecurringEventId" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'ALTER TABLE "SyncedEvent" ADD COLUMN IF NOT EXISTS "sourceOriginalStart" TEXT'
+    );
+    await prisma.$executeRawUnsafe(
+      'CREATE INDEX IF NOT EXISTS "SyncedEvent_syncId_sourceCalendarId_sourceRecurringEventId_idx" ON "SyncedEvent"("syncId", "sourceCalendarId", "sourceRecurringEventId")'
     );
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "SyncEventAudit" (

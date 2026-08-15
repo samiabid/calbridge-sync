@@ -1,28 +1,94 @@
-import { PrismaClient } from '@prisma/client';
 import { v4 as uuidv4 } from 'uuid';
 import { getAuthenticatedCalendar } from './calendar';
 import { syncEvent, handleEventDeletion } from './sync';
 import { withRateLimitRetry } from './rateLimit';
 import { getPublicBaseUrl } from '../config/runtime';
-import { recordSyncAudit, type SyncDirection } from './syncAudit';
+import { recordSyncFailure, type SyncDirection } from './syncAudit';
 import { sendAlert } from './alerts';
 import { logError, logInfo, logWarn } from './logger';
 import { getSyncFutureWindowEnd, normalizeSyncFutureDays } from './syncWindow';
+import { resolveSyncAccounts } from './syncLogic';
+import { prisma } from './prisma';
 import {
-  ALLOWED_RSVP_STATUSES,
-  buildCancellationState,
-  getEventSelfResponseStatus,
-  getRecurringSeriesId,
-  normalizeRsvpStatuses,
-  shouldSkipActiveEventDueToCancellation,
-  shouldSkipEvent,
-} from './syncLogic';
+  getMappingOriginalStart,
+  getRecurrenceIdentity,
+  isOriginalStartInWindow,
+  mappingBelongsToSeries,
+  shouldExpandChangedEvent,
+} from './recurrenceLogic';
+import { CoalescingRunner } from './coalescingRunner';
 
-const prisma = new PrismaClient();
 const MAX_INVALID_GRANT_FAILURES = 200;
-const WEBHOOK_WATERMARK_OVERLAP_MS = 2 * 60 * 1000;
-type RsvpStatus = (typeof ALLOWED_RSVP_STATUSES)[number];
+const WEBHOOK_BOOTSTRAP_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Per-sync guard so a watermark gap doesn't stampede reconciliations.
+const reconciliationsInFlight = new Set<string>();
+
+// A watermark older than the fetch lookback means changes in the gap window
+// were never fetched and will not propagate. The clamp has to stay (Google
+// rejects very old updatedMin values); this makes the data loss visible and
+// kicks off the existing repair path.
+async function reportWatermarkGap(
+  sync: { id: string; userId: string },
+  direction: SyncDirection,
+  staleWatermark: Date,
+  minAllowed: Date
+) {
+  const message =
+    `Sync was paused or stalled from ${staleWatermark.toISOString()} to ` +
+    `${minAllowed.toISOString()}; changes in that window may not have propagated. ` +
+    'Run Reconcile to repair.';
+
+  await recordSyncFailure({
+    syncId: sync.id,
+    userId: sync.userId,
+    direction,
+    action: 'update',
+    errorCode: 'watermark_gap',
+    errorMessage: message,
+  }).catch((error) => {
+    logError('watermark_gap_failure_record_failed', {
+      syncId: sync.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+
+  await sendAlert({
+    severity: 'warn',
+    key: `webhook_watermark_gap:${sync.id}`,
+    message: `Watermark gap detected for sync ${sync.id}; automatic reconciliation started.`,
+    details: {
+      syncId: sync.id,
+      direction,
+      gapStart: staleWatermark.toISOString(),
+      gapEnd: minAllowed.toISOString(),
+    },
+    cooldownMs: 24 * 60 * 60 * 1000,
+  }).catch(() => {});
+
+  if (!reconciliationsInFlight.has(sync.id)) {
+    reconciliationsInFlight.add(sync.id);
+    // Deferred import: syncRepair -> sync -> webhook forms a module cycle, so
+    // resolve the reconciler at call time the same way sync/webhook already do.
+    void import('./syncRepair')
+      .then(({ runSyncReconciliation }) => runSyncReconciliation(sync.id, sync.userId))
+      .then((summary) => {
+        logInfo('watermark_gap_reconciliation_completed', {
+          syncId: sync.id,
+          summary: typeof summary === 'object' ? JSON.stringify(summary).slice(0, 500) : String(summary),
+        });
+      })
+      .catch((error) => {
+        logError('watermark_gap_reconciliation_failed', {
+          syncId: sync.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        reconciliationsInFlight.delete(sync.id);
+      });
+  }
+}
 function isInvalidGrantError(error: any): boolean {
   const tokenError = error?.response?.data?.error;
   const message = String(error?.message || '').toLowerCase();
@@ -149,17 +215,21 @@ async function findWorkingAccountForCalendar(
           `checking fallback account visibility for calendar ${calendarId}`
         );
         if (listEntry.data.accessRole === 'freeBusyReader') {
-          console.warn(
-            `Skipping fallback account ${account.displayName} for calendar ${calendarId}: free/busy-only access`
-          );
+          logWarn('fallback_account_skipped', {
+            accountDisplayName: account.displayName,
+            calendarId,
+            reason: 'free_busy_only_access',
+          });
           continue;
         }
       } catch (listError: any) {
         const status = listError?.code || listError?.response?.status;
         if (status === 404) {
-          console.warn(
-            `Skipping fallback account ${account.displayName} for calendar ${calendarId}: visibility unknown (calendarList entry missing)`
-          );
+          logWarn('fallback_account_skipped', {
+            accountDisplayName: account.displayName,
+            calendarId,
+            reason: 'calendar_list_entry_missing',
+          });
           continue;
         }
         throw listError;
@@ -266,373 +336,509 @@ export async function stopWebhook(
   }
 }
 
+interface WebhookDirectionContext {
+  direction: SyncDirection;
+  sourceCalendarId: string;
+  targetCalendarId: string;
+  listAccountId: string;
+  writeAccountId: string;
+  listAccountField: 'sourceGoogleAccountId' | 'targetGoogleAccountId';
+  syncTokenField: 'sourceSyncToken' | 'targetSyncToken';
+  updatedMinField: 'sourceUpdatedMin' | 'targetUpdatedMin';
+}
+
+interface EventProcessingResult {
+  hadError: boolean;
+  lastError: string;
+  lastDetectedChangeAt: Date | null;
+}
+
+const webhookRuns = new CoalescingRunner();
+
+function getDirectionContext(sync: any, direction: SyncDirection): WebhookDirectionContext {
+  const isSource = direction === 'source_to_target';
+  const { sourceAccountId, targetAccountId } = resolveSyncAccounts(sync);
+  return {
+    direction,
+    sourceCalendarId: isSource ? sync.sourceCalendarId : sync.targetCalendarId,
+    targetCalendarId: isSource ? sync.targetCalendarId : sync.sourceCalendarId,
+    listAccountId: isSource ? sourceAccountId : targetAccountId,
+    writeAccountId: isSource ? targetAccountId : sourceAccountId,
+    listAccountField: isSource ? 'sourceGoogleAccountId' : 'targetGoogleAccountId',
+    syncTokenField: isSource ? 'sourceSyncToken' : 'targetSyncToken',
+    updatedMinField: isSource ? 'sourceUpdatedMin' : 'targetUpdatedMin',
+  };
+}
+
+function getHttpStatus(error: any): number | undefined {
+  const value = error?.code || error?.status || error?.response?.status;
+  return typeof value === 'number' ? value : undefined;
+}
+
+function collapseEventsById(events: any[]): any[] {
+  const byId = new Map<string, any>();
+  for (const event of events) {
+    if (!event?.id) continue;
+    const previous = byId.get(event.id);
+    if (!previous || event.status === 'cancelled' || previous.status !== 'cancelled') {
+      byId.set(event.id, event);
+    }
+  }
+  return Array.from(byId.values());
+}
+
+export async function establishSyncToken(calendar: any, calendarId: string, syncId: string): Promise<string> {
+  let pageToken: string | undefined;
+  let nextSyncToken: string | undefined;
+  do {
+    const response: any = await withRateLimitRetry(
+      () =>
+        calendar.events.list({
+          calendarId,
+          maxResults: 2500,
+          showDeleted: true,
+          singleEvents: false,
+          pageToken,
+        }),
+      `establishing Google sync token for sync ${syncId}`
+    );
+    pageToken = response.data.nextPageToken || undefined;
+    nextSyncToken = response.data.nextSyncToken || nextSyncToken;
+  } while (pageToken);
+
+  if (!nextSyncToken) {
+    throw new Error('Google did not return a sync token after the full calendar baseline');
+  }
+  return nextSyncToken;
+}
+
+export async function listIncrementalChanges(
+  calendar: any,
+  calendarId: string,
+  syncToken: string,
+  syncId: string
+): Promise<{ events: any[]; nextSyncToken: string }> {
+  const events: any[] = [];
+  let pageToken: string | undefined;
+  let nextSyncToken: string | undefined;
+  do {
+    const response: any = await withRateLimitRetry(
+      () =>
+        calendar.events.list({
+          calendarId,
+          syncToken,
+          maxResults: 2500,
+          showDeleted: true,
+          singleEvents: false,
+          pageToken,
+        }),
+      `listing incremental Google changes for sync ${syncId}`
+    );
+    events.push(...(response.data.items || []));
+    pageToken = response.data.nextPageToken || undefined;
+    nextSyncToken = response.data.nextSyncToken || nextSyncToken;
+  } while (pageToken);
+
+  if (!nextSyncToken) {
+    throw new Error('Google did not return the next sync token');
+  }
+  return { events: collapseEventsById(events), nextSyncToken };
+}
+
+async function listLegacyBootstrapChanges(
+  calendar: any,
+  calendarId: string,
+  updatedMin: Date,
+  futureWindowEnd: Date,
+  syncId: string
+): Promise<any[]> {
+  const events: any[] = [];
+  let pageToken: string | undefined;
+  do {
+    const response: any = await withRateLimitRetry(
+      () =>
+        calendar.events.list({
+          calendarId,
+          updatedMin: updatedMin.toISOString(),
+          timeMax: futureWindowEnd.toISOString(),
+          showDeleted: true,
+          maxResults: 250,
+          singleEvents: true,
+          orderBy: 'updated',
+          pageToken,
+        }),
+      `listing bootstrap changes for sync ${syncId}`
+    );
+    events.push(...(response.data.items || []));
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+  return collapseEventsById(events);
+}
+
+export async function listRecurringInstances(
+  calendar: any,
+  calendarId: string,
+  recurringEventId: string,
+  timeMin: Date,
+  timeMax: Date,
+  syncId: string
+): Promise<any[]> {
+  const events: any[] = [];
+  let pageToken: string | undefined;
+  do {
+    const response: any = await withRateLimitRetry(
+      () =>
+        calendar.events.instances({
+          calendarId,
+          eventId: recurringEventId,
+          timeMin: timeMin.toISOString(),
+          timeMax: timeMax.toISOString(),
+          showDeleted: true,
+          maxResults: 2500,
+          pageToken,
+        }),
+      `expanding recurring series ${recurringEventId} for sync ${syncId}`
+    );
+    events.push(...(response.data.items || []));
+    pageToken = response.data.nextPageToken || undefined;
+  } while (pageToken);
+  return collapseEventsById(events);
+}
+
+async function isMappedRecurringSeries(
+  syncId: string,
+  sourceCalendarId: string,
+  recurringEventId: string
+): Promise<boolean> {
+  const direct = await prisma.syncedEvent.count({
+    where: { syncId, sourceCalendarId, sourceRecurringEventId: recurringEventId },
+  });
+  if (direct > 0) return true;
+  const legacy = await prisma.syncedEvent.count({
+    where: { syncId, sourceCalendarId, sourceEventId: { startsWith: `${recurringEventId}_` } },
+  });
+  return legacy > 0;
+}
+
+async function processSourceEvent(
+  sync: any,
+  event: any,
+  context: WebhookDirectionContext
+) {
+  if (!event?.id) return;
+  if (event.status === 'cancelled') {
+    const identity = getRecurrenceIdentity(event);
+    const isSeriesMaster =
+      !identity.recurringEventId &&
+      (await isMappedRecurringSeries(sync.id, context.sourceCalendarId, event.id));
+    await handleEventDeletion(
+      sync.id,
+      sync.userId,
+      event.id,
+      context.sourceCalendarId,
+      context.writeAccountId,
+      identity.recurringEventId
+        ? { recurringEventId: identity.recurringEventId, isBulkSeriesCancellation: false }
+        : isSeriesMaster
+          ? { recurringEventId: event.id, isBulkSeriesCancellation: true }
+          : undefined,
+      context.direction
+    );
+    return;
+  }
+
+  await syncEvent(
+    sync.id,
+    sync.userId,
+    event,
+    context.sourceCalendarId,
+    context.targetCalendarId,
+    context.writeAccountId,
+    false,
+    context.listAccountId,
+    context.direction
+  );
+}
+
+async function reconcileSeriesMappings(
+  sync: any,
+  context: WebhookDirectionContext,
+  recurringEventId: string,
+  instances: any[],
+  timeMin: Date,
+  timeMax: Date
+) {
+  const authoritativeIds = new Set(instances.map((event) => event.id).filter(Boolean));
+  const candidates = await prisma.syncedEvent.findMany({
+    where: {
+      syncId: sync.id,
+      sourceCalendarId: context.sourceCalendarId,
+      OR: [
+        { sourceRecurringEventId: recurringEventId },
+        { sourceEventId: { startsWith: `${recurringEventId}_` } },
+      ],
+    },
+  });
+
+  for (const mapping of candidates) {
+    if (!mappingBelongsToSeries(mapping, recurringEventId)) continue;
+    if (authoritativeIds.has(mapping.sourceEventId)) continue;
+    const originalStart = getMappingOriginalStart(mapping);
+    if (!isOriginalStartInWindow(originalStart, timeMin, timeMax)) continue;
+    await handleEventDeletion(
+      sync.id,
+      sync.userId,
+      mapping.sourceEventId,
+      context.sourceCalendarId,
+      context.writeAccountId,
+      { recurringEventId, isBulkSeriesCancellation: false },
+      context.direction
+    );
+  }
+}
+
+async function processChangedEvents(
+  sync: any,
+  events: any[],
+  context: WebhookDirectionContext,
+  calendar: any,
+  now: Date
+): Promise<EventProcessingResult> {
+  const result: EventProcessingResult = {
+    hadError: false,
+    lastError: '',
+    lastDetectedChangeAt: null,
+  };
+  const historyStart = new Date(now);
+  historyStart.setMonth(historyStart.getMonth() - 2);
+  const futureWindowEnd = getSyncFutureWindowEnd(now);
+
+  for (const event of events) {
+    if (event?.updated) {
+      const updatedAt = new Date(event.updated);
+      if (
+        !Number.isNaN(updatedAt.getTime()) &&
+        (!result.lastDetectedChangeAt || updatedAt > result.lastDetectedChangeAt)
+      ) {
+        result.lastDetectedChangeAt = updatedAt;
+      }
+    }
+
+    try {
+      if (shouldExpandChangedEvent(event)) {
+        const instances = await listRecurringInstances(
+          calendar,
+          context.sourceCalendarId,
+          event.id,
+          historyStart,
+          futureWindowEnd,
+          sync.id
+        );
+        for (const instance of instances) {
+          await processSourceEvent(sync, instance, context);
+        }
+        await reconcileSeriesMappings(
+          sync,
+          context,
+          event.id,
+          instances,
+          historyStart,
+          futureWindowEnd
+        );
+      } else {
+        await processSourceEvent(sync, event, context);
+      }
+    } catch (error) {
+      if (isSyncMissingError(error)) throw error;
+      result.hadError = true;
+      result.lastError = error instanceof Error ? error.message : String(error);
+      logError('webhook_event_processing_failed', {
+        syncId: sync.id,
+        direction: context.direction,
+        eventId: event?.id || null,
+        error: result.lastError,
+      });
+    }
+  }
+  return result;
+}
+
+async function processWebhookDirection(syncId: string, direction: SyncDirection) {
+  const sync = await prisma.sync.findUnique({ where: { id: syncId } });
+  if (!sync || !sync.isActive || (direction === 'target_to_source' && !sync.isTwoWay)) return;
+
+  let context = getDirectionContext(sync, direction);
+  let calendar = await getAuthenticatedCalendar(sync.userId, context.listAccountId);
+  const processWithCurrentAccount = async () => {
+    const now = new Date();
+    const futureWindowEnd = getSyncFutureWindowEnd(now);
+    let syncToken = (sync as any)[context.syncTokenField] as string | null;
+    let bootstrapResult: EventProcessingResult | null = null;
+
+    if (!syncToken) {
+      syncToken = await establishSyncToken(calendar, context.sourceCalendarId, sync.id);
+      const fallback = new Date(now.getTime() - WEBHOOK_BOOTSTRAP_LOOKBACK_MS);
+      const storedUpdatedMin = (sync as any)[context.updatedMinField] as Date | null;
+      const effectiveUpdatedMin = storedUpdatedMin && storedUpdatedMin > fallback
+        ? storedUpdatedMin
+        : fallback;
+      if (storedUpdatedMin && storedUpdatedMin < fallback) {
+        await reportWatermarkGap(sync, direction, storedUpdatedMin, fallback);
+      }
+      const bootstrapEvents = await listLegacyBootstrapChanges(
+        calendar,
+        context.sourceCalendarId,
+        effectiveUpdatedMin,
+        futureWindowEnd,
+        sync.id
+      );
+      bootstrapResult = await processChangedEvents(sync, bootstrapEvents, context, calendar, now);
+      if (bootstrapResult.hadError) {
+        throw new Error(bootstrapResult.lastError || 'Bootstrap event processing failed');
+      }
+    }
+
+    let incremental;
+    try {
+      incremental = await listIncrementalChanges(
+        calendar,
+        context.sourceCalendarId,
+        syncToken,
+        sync.id
+      );
+    } catch (error) {
+      if (getHttpStatus(error) !== 410) throw error;
+      logWarn('webhook_sync_token_expired', { syncId: sync.id, direction });
+      await updateSyncIfExists(sync.id, { [context.syncTokenField]: null }, 'clearing expired sync token');
+      const gapStart = ((sync as any)[context.updatedMinField] as Date | null) ||
+        new Date(now.getTime() - WEBHOOK_BOOTSTRAP_LOOKBACK_MS);
+      await reportWatermarkGap(sync, direction, gapStart, now);
+      syncToken = await establishSyncToken(calendar, context.sourceCalendarId, sync.id);
+      incremental = await listIncrementalChanges(
+        calendar,
+        context.sourceCalendarId,
+        syncToken,
+        sync.id
+      );
+    }
+
+    const processed = await processChangedEvents(
+      sync,
+      incremental.events,
+      context,
+      calendar,
+      now
+    );
+    if (processed.hadError) {
+      throw new Error(processed.lastError || 'Incremental event processing failed');
+    }
+
+    const lastDetectedChangeAt =
+      processed.lastDetectedChangeAt || bootstrapResult?.lastDetectedChangeAt || null;
+    const updatePayload: Record<string, any> = {
+      [context.syncTokenField]: incremental.nextSyncToken,
+      [context.updatedMinField]: now,
+      lastSyncStatus: 'success',
+      lastSyncError: null,
+    };
+    if (lastDetectedChangeAt) updatePayload.lastDetectedChangeAt = lastDetectedChangeAt;
+    await updateSyncIfExists(sync.id, updatePayload, 'persisting incremental sync token');
+    await clearInvalidGrantFailures(sync.id);
+    logInfo('webhook_processing_completed', {
+      syncId: sync.id,
+      direction,
+      changedEvents: incremental.events.length,
+      futureWindowDays: normalizeSyncFutureDays(process.env.SYNC_FUTURE_DAYS),
+      syncTokenPersisted: true,
+    });
+  };
+
+  logInfo('webhook_processing_started', {
+    syncId: sync.id,
+    direction,
+    sourceCalendarId: context.sourceCalendarId,
+    targetCalendarId: context.targetCalendarId,
+  });
+
+  try {
+    await processWithCurrentAccount();
+  } catch (error) {
+    if (isSyncMissingError(error)) return;
+    let finalError = error;
+    if (isInvalidGrantError(error)) {
+      const disabled = await recordInvalidGrantFailure(sync.id, 'incremental calendar sync');
+      if (!disabled) {
+        const fallback = await findWorkingAccountForCalendar(
+          sync.userId,
+          context.sourceCalendarId,
+          context.listAccountId
+        );
+        if (fallback) {
+          context = { ...context, listAccountId: fallback.accountId };
+          calendar = fallback.calendar;
+          await updateSyncIfExists(
+            sync.id,
+            { [context.listAccountField]: fallback.accountId },
+            'saving fallback incremental-sync account'
+          );
+          try {
+            await processWithCurrentAccount();
+            return;
+          } catch (fallbackError) {
+            finalError = fallbackError;
+          }
+        }
+      }
+    }
+
+    const message = finalError instanceof Error ? finalError.message : String(finalError);
+    await updateSyncIfExists(
+      sync.id,
+      { lastSyncStatus: 'error', lastSyncError: message.slice(0, 1000) },
+      'recording incremental webhook failure'
+    );
+    logError('webhook_processing_failed', { syncId: sync.id, direction, error: message });
+    await sendAlert({
+      severity: 'error',
+      key: `webhook_processing_crashed:${sync.id}:${direction}`,
+      message: `Webhook processing crashed for sync ${sync.id}.`,
+      details: { syncId: sync.id, direction, error: message },
+      cooldownMs: 30 * 60 * 1000,
+    });
+  }
+}
+
+async function enqueueWebhookDirection(syncId: string, direction: SyncDirection): Promise<void> {
+  const key = `${syncId}:${direction}`;
+  return webhookRuns.run(key, () => processWebhookDirection(syncId, direction));
+}
+
+export async function runActiveSyncCatchup(): Promise<void> {
+  const syncs = await prisma.sync.findMany({
+    where: { isActive: true },
+    select: { id: true, isTwoWay: true },
+  });
+  for (const sync of syncs) {
+    await enqueueWebhookDirection(sync.id, 'source_to_target');
+    if (sync.isTwoWay) await enqueueWebhookDirection(sync.id, 'target_to_source');
+  }
+}
+
 export async function handleWebhookNotification(channelId: string, resourceId: string) {
-  // Find sync by channel + resource pairing to avoid spoofed notifications.
   const sync = await prisma.sync.findFirst({
     where: {
+      isActive: true,
       OR: [
         { sourceChannelId: channelId, sourceResourceId: resourceId },
         { targetChannelId: channelId, targetResourceId: resourceId },
       ],
     },
   });
-
-  if (!sync || !sync.isActive) {
-    logInfo('webhook_notification_ignored', {
-      channelId,
-      resourceId,
-    });
+  if (!sync) {
+    logInfo('webhook_notification_ignored', { channelId, resourceId });
     return;
   }
-
-  const isSourceCalendar = sync.sourceChannelId === channelId;
-  const sourceCalendarId = isSourceCalendar ? sync.sourceCalendarId : sync.targetCalendarId;
-  const targetCalendarId = isSourceCalendar ? sync.targetCalendarId : sync.sourceCalendarId;
-  const sourceAccountId = sync.sourceGoogleAccountId || sync.googleAccountId;
-  const targetAccountId = sync.targetGoogleAccountId || sync.googleAccountId;
-  let listAccountId = isSourceCalendar ? sourceAccountId : targetAccountId;
-  const writeAccountId = isSourceCalendar ? targetAccountId : sourceAccountId;
-  const updatedMinField = isSourceCalendar ? 'sourceUpdatedMin' : 'targetUpdatedMin';
-  const listAccountField = isSourceCalendar ? 'sourceGoogleAccountId' : 'targetGoogleAccountId';
-  const direction: SyncDirection = isSourceCalendar ? 'source_to_target' : 'target_to_source';
-
-  logInfo('webhook_processing_started', {
-    syncId: sync.id,
-    channelId,
-    resourceId,
-    sourceCalendarId,
-    targetCalendarId,
-    direction,
-  });
-
-  let calendar = await getAuthenticatedCalendar(sync.userId, listAccountId);
-
-  try {
-    let hadInvalidGrant = false;
-    const processingStartedAt = new Date();
-    const futureWindowEnd = getSyncFutureWindowEnd(processingStartedAt);
-    const futureWindowDays = normalizeSyncFutureDays(process.env.SYNC_FUTURE_DAYS);
-
-    // Use updatedMin to catch updates regardless of event start time.
-    const maxLookbackMs = 7 * 24 * 60 * 60 * 1000;
-    const fallbackUpdatedMin = new Date(Date.now() - maxLookbackMs);
-    const updatedMinValue = (sync as any)[updatedMinField];
-    const updatedMin = updatedMinValue ? new Date(updatedMinValue) : fallbackUpdatedMin;
-    const minAllowed = new Date(Date.now() - maxLookbackMs);
-    const effectiveUpdatedMin = updatedMin < minAllowed ? minAllowed : updatedMin;
-
-    if (effectiveUpdatedMin !== updatedMin) {
-      const updated = await updateSyncIfExists(
-        sync.id,
-        { [updatedMinField]: effectiveUpdatedMin } as any,
-        'clamping updatedMin'
-      );
-      if (!updated) return;
-    }
-
-    console.log(
-      `Fetching updates from calendar ${sourceCalendarId} since ${effectiveUpdatedMin.toISOString()} through ${futureWindowEnd.toISOString()}`
-    );
-
-    const events: any[] = [];
-    let pageToken: string | undefined;
-
-    const listEvents = async (minDate: Date, token?: string) => {
-      return withRateLimitRetry(
-        () =>
-          calendar.events.list({
-            calendarId: sourceCalendarId,
-            updatedMin: minDate.toISOString(),
-            timeMax: futureWindowEnd.toISOString(),
-            showDeleted: true,
-            maxResults: 250,
-            singleEvents: true,
-            orderBy: 'updated',
-            pageToken: token,
-          }),
-        `listing webhook updates for sync ${sync.id}`
-      );
-    };
-
-    try {
-      do {
-        const response = await listEvents(effectiveUpdatedMin, pageToken);
-        events.push(...(response.data.items || []));
-        pageToken = response.data.nextPageToken || undefined;
-      } while (pageToken);
-    } catch (error: any) {
-      if (error?.code === 410 || error?.response?.status === 410) {
-        console.warn('updatedMin too old; resetting to fallback window and retrying');
-        const fallback = new Date(Date.now() - maxLookbackMs);
-        pageToken = undefined;
-        events.length = 0;
-        do {
-          const response = await listEvents(fallback, pageToken);
-          events.push(...(response.data.items || []));
-          pageToken = response.data.nextPageToken || undefined;
-        } while (pageToken);
-        const updated = await updateSyncIfExists(
-          sync.id,
-          { [updatedMinField]: fallback } as any,
-          'resetting updatedMin after 410'
-        );
-        if (!updated) return;
-      } else if (isInvalidGrantError(error)) {
-        hadInvalidGrant = true;
-        const disabled = await recordInvalidGrantFailure(sync.id, 'listing source calendar updates');
-        if (disabled) {
-          await updateSyncIfExists(
-            sync.id,
-            {
-              lastSyncStatus: 'error',
-              lastSyncError:
-                'Sync disabled after repeated invalid_grant failures while listing calendar updates.',
-            },
-            'marking sync as disabled after invalid_grant'
-          );
-          return;
-        }
-
-        logWarn('webhook_list_account_invalid_grant_fallback', {
-          syncId: sync.id,
-          accountId: listAccountId || null,
-          calendarId: sourceCalendarId,
-        });
-
-        const fallback = await findWorkingAccountForCalendar(
-          sync.userId,
-          sourceCalendarId,
-          listAccountId
-        );
-
-        if (!fallback) {
-          console.error(
-            `No fallback account available for sync ${sync.id}; account re-auth is required`
-          );
-          throw error;
-        }
-
-        listAccountId = fallback.accountId;
-        calendar = fallback.calendar;
-
-        const updated = await updateSyncIfExists(
-          sync.id,
-          { [listAccountField]: fallback.accountId } as any,
-          'saving fallback list account'
-        );
-        if (!updated) return;
-
-        pageToken = undefined;
-        events.length = 0;
-        do {
-          const response = await listEvents(effectiveUpdatedMin, pageToken);
-          events.push(...(response.data.items || []));
-          pageToken = response.data.nextPageToken || undefined;
-        } while (pageToken);
-      } else {
-        throw error;
-      }
-    }
-
-    const cancellationState = buildCancellationState(events);
-    let hadProcessingError = false;
-    let lastProcessingError = '';
-    let lastDetectedChangeAt: Date | null = null;
-
-    for (const event of events) {
-      if (event?.updated) {
-        const updatedAt = new Date(event.updated);
-        if (!Number.isNaN(updatedAt.getTime()) && (!lastDetectedChangeAt || updatedAt > lastDetectedChangeAt)) {
-          lastDetectedChangeAt = updatedAt;
-        }
-      }
-
-      if (event?.status !== 'cancelled' || !event?.id) continue;
-    }
-
-    for (const event of events) {
-      if (!event.id) continue;
-
-      try {
-        // Handle deletions before filters.
-        // Filters should only apply to active events, not cancel/delete propagation.
-        if (event.status === 'cancelled') {
-          console.log(`Handling deletion for cancelled event ${event.id}`);
-          const recurringSeriesId = getRecurringSeriesId(event);
-          const isBulkSeriesCancellation = Boolean(
-            recurringSeriesId &&
-              cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
-          );
-          await handleEventDeletion(
-            sync.id,
-            sync.userId,
-            event.id,
-            sourceCalendarId,
-            writeAccountId,
-            {
-              recurringEventId: recurringSeriesId,
-              isBulkSeriesCancellation,
-            },
-            direction
-          );
-          continue;
-        }
-
-        if (shouldSkipActiveEventDueToCancellation(event, cancellationState)) {
-          const recurringSeriesId = getRecurringSeriesId(event);
-          console.log(`Skipping active event ${event.id} because a cancelled version is present in the same delta window`);
-          await recordSyncAudit({
-            syncId: sync.id,
-            userId: sync.userId,
-            direction,
-            action: 'skip',
-            result: 'skipped',
-            sourceEventId: event.id,
-            sourceCalendarId,
-            eventSummary: event.summary || null,
-            reasonCode:
-              recurringSeriesId && cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
-                ? 'series_bulk_cancelled'
-                : 'cancelled_in_same_delta',
-            reasonMessage:
-              recurringSeriesId && cancellationState.bulkCancelledSeriesIds.has(recurringSeriesId)
-                ? 'Active event skipped because recurring series is bulk-cancelled in the same delta window'
-                : 'Active event skipped because a cancelled version exists in the same delta window',
-          });
-          continue;
-        }
-
-        // Skip if active event should be filtered
-        if (
-          shouldSkipEvent(
-            event,
-            sync.excludedColors,
-            sync.excludedKeywords,
-            sync.syncFreeEvents,
-            normalizeRsvpStatuses(sync.copyRsvpStatuses)
-          )
-        ) {
-          console.log(`Skipping event ${event.id} (${event.summary}) - filtered out`);
-          await recordSyncAudit({
-            syncId: sync.id,
-            userId: sync.userId,
-            direction,
-            action: 'skip',
-            result: 'skipped',
-            sourceEventId: event.id,
-            sourceCalendarId,
-            eventSummary: event.summary || null,
-            reasonCode: 'filtered',
-            reasonMessage: 'Event skipped by sync filters during webhook processing',
-          });
-          continue;
-        }
-
-        // Sync or update event
-        console.log(`Processing event ${event.id} (${event.summary})`);
-        await syncEvent(
-          sync.id,
-          sync.userId,
-          event,
-          sourceCalendarId,
-          targetCalendarId,
-          writeAccountId,
-          false,
-          listAccountId,
-          direction
-        );
-      } catch (eventError) {
-        if (isSyncMissingError(eventError)) {
-          console.warn(`Sync ${sync.id} removed during event processing; stopping webhook run`);
-          return;
-        }
-        if (isInvalidGrantError(eventError)) {
-          hadInvalidGrant = true;
-        }
-        hadProcessingError = true;
-        lastProcessingError = eventError instanceof Error ? eventError.message : String(eventError);
-        logError('webhook_event_processing_failed', {
-          syncId: sync.id,
-          eventId: event.id,
-          direction,
-          error: eventError instanceof Error ? eventError.message : String(eventError),
-        });
-      }
-    }
-
-    if (!hadInvalidGrant) {
-      await clearInvalidGrantFailures(sync.id);
-    }
-
-    const nextUpdatedMinBase = lastDetectedChangeAt || processingStartedAt;
-    const nextUpdatedMin = new Date(
-      Math.max(0, nextUpdatedMinBase.getTime() - WEBHOOK_WATERMARK_OVERLAP_MS)
-    );
-
-    const updatePayload: Record<string, any> = {
-      [updatedMinField]: nextUpdatedMin,
-      lastSyncStatus: hadProcessingError ? 'error' : 'success',
-      lastSyncError: hadProcessingError ? lastProcessingError.slice(0, 1000) : null,
-    };
-    if (lastDetectedChangeAt) {
-      updatePayload.lastDetectedChangeAt = lastDetectedChangeAt;
-    }
-
-    const updated = await updateSyncIfExists(sync.id, updatePayload, 'finalizing updatedMin/status');
-    if (!updated) return;
-
-    logInfo('webhook_processing_completed', {
-      syncId: sync.id,
-      direction,
-      hadProcessingError,
-      futureWindowDays,
-      nextUpdatedMin: nextUpdatedMin.toISOString(),
-      lastProcessingError: hadProcessingError ? lastProcessingError.slice(0, 300) : null,
-    });
-    if (hadProcessingError) {
-      await sendAlert({
-        severity: 'error',
-        key: `webhook_processing_failed:${sync.id}`,
-        message: `Webhook processing completed with errors for sync ${sync.id}.`,
-        details: {
-          syncId: sync.id,
-          direction,
-          error: lastProcessingError.slice(0, 500),
-        },
-        cooldownMs: 30 * 60 * 1000,
-      });
-    }
-  } catch (error: any) {
-    if (isSyncMissingError(error)) {
-      logWarn('webhook_sync_removed_during_processing', {
-        syncId: sync.id,
-      });
-      return;
-    }
-    await updateSyncIfExists(
-      sync.id,
-      {
-        lastSyncStatus: 'error',
-        lastSyncError: error instanceof Error ? error.message.slice(0, 1000) : String(error).slice(0, 1000),
-      },
-      'recording webhook failure'
-    );
-    const message = error instanceof Error ? error.message : String(error);
-    logError('webhook_processing_failed', {
-      syncId: sync.id,
-      direction,
-      error: message,
-    });
-    await sendAlert({
-      severity: 'error',
-      key: `webhook_processing_crashed:${sync.id}`,
-      message: `Webhook processing crashed for sync ${sync.id}.`,
-      details: {
-        syncId: sync.id,
-        direction,
-        error: message,
-      },
-      cooldownMs: 30 * 60 * 1000,
-    });
-  }
+  const direction: SyncDirection =
+    sync.sourceChannelId === channelId ? 'source_to_target' : 'target_to_source';
+  await enqueueWebhookDirection(sync.id, direction);
 }

@@ -109,6 +109,10 @@ model Sync {
   invalidGrantFailures  Int @default(0) // Auto-disable sync after repeated token revoke failures
   sourceUpdatedMin  DateTime?
   targetUpdatedMin  DateTime?
+  sourceSyncToken   String?
+  targetSyncToken   String?
+  sourceRecurrenceHorizon DateTime?
+  targetRecurrenceHorizon DateTime?
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -137,6 +141,10 @@ model SyncedEvent {
   // Synced event info
   targetEventId     String
   targetCalendarId  String
+
+  // Recurrence identity survives moved instances and avoids event-id heuristics.
+  sourceRecurringEventId String?
+  sourceOriginalStart    String?
   
   // Metadata
   lastSyncedAt      DateTime @default(now())
@@ -146,6 +154,7 @@ model SyncedEvent {
   @@index([syncId])
   @@index([sourceEventId])
   @@index([targetEventId])
+  @@index([syncId, sourceCalendarId, sourceRecurringEventId])
 }
 
 model SyncEventAudit {

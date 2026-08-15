@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildCancellationState,
+  computeNextWebhookWatermark,
   eventHasAnyCopyableDetails,
+  getRecurringSeriesIdFromEventId,
   isDetailPlaceholderSummary,
   needsReadableSourceDetails,
   normalizeRsvpStatuses,
+  resolveSyncAccounts,
+  shouldAttemptAccountDetection,
   shouldSkipActiveEventDueToCancellation,
   shouldSkipEvent,
 } from '../services/syncLogic';
@@ -136,7 +140,7 @@ test('active event is skipped when the same event id is cancelled in the same de
   );
 });
 
-test('bulk series cancellation skips remaining active instances from the same series', () => {
+test('multiple cancelled instances never imply that the whole series was cancelled', () => {
   const state = buildCancellationState([
     { id: 'series123_20260312T120000Z', status: 'cancelled', recurringEventId: 'series123' },
     { id: 'series123_20260319T120000Z', status: 'cancelled', recurringEventId: 'series123' },
@@ -147,7 +151,7 @@ test('bulk series cancellation skips remaining active instances from the same se
       { id: 'series123_20260326T120000Z', status: 'confirmed', recurringEventId: 'series123' },
       state
     ),
-    true
+    false
   );
 
   assert.equal(
@@ -170,5 +174,86 @@ test('single cancelled recurring instance does not suppress unrelated active ins
       state
     ),
     false
+  );
+});
+
+test('watermark never advances past fetch start', () => {
+  const overlapMs = 2 * 60 * 1000;
+  const fetchStart = new Date('2026-07-01T12:00:00.000Z');
+
+  // Event updated during processing (after fetch start): clamp to fetch start.
+  const lateChange = new Date('2026-07-01T12:05:00.000Z');
+  assert.deepEqual(
+    computeNextWebhookWatermark(fetchStart, lateChange, overlapMs),
+    new Date(fetchStart.getTime() - overlapMs)
+  );
+
+  // Older detected change keeps the extra overlap.
+  const earlyChange = new Date('2026-07-01T11:30:00.000Z');
+  assert.deepEqual(
+    computeNextWebhookWatermark(fetchStart, earlyChange, overlapMs),
+    new Date(earlyChange.getTime() - overlapMs)
+  );
+
+  // No detected change: fetch start minus overlap.
+  assert.deepEqual(
+    computeNextWebhookWatermark(fetchStart, null, overlapMs),
+    new Date(fetchStart.getTime() - overlapMs)
+  );
+});
+
+test('account detection re-opens after the cooldown', () => {
+  const now = new Date('2026-07-01T12:00:00.000Z');
+  const sixHoursMs = 6 * 60 * 60 * 1000;
+
+  assert.deepEqual(shouldAttemptAccountDetection(0, null, now), {
+    attempt: true,
+    isCooldownRetry: false,
+  });
+  assert.deepEqual(shouldAttemptAccountDetection(2, new Date(now.getTime() - 1000), now), {
+    attempt: true,
+    isCooldownRetry: false,
+  });
+
+  // Exhausted and recent: blocked.
+  assert.deepEqual(shouldAttemptAccountDetection(3, new Date(now.getTime() - 1000), now), {
+    attempt: false,
+    isCooldownRetry: false,
+  });
+
+  // Exhausted but cooled down: retry.
+  assert.deepEqual(shouldAttemptAccountDetection(3, new Date(now.getTime() - sixHoursMs), now), {
+    attempt: true,
+    isCooldownRetry: true,
+  });
+
+  // Exhausted with no recorded attempt time (pre-migration rows): retry.
+  assert.deepEqual(shouldAttemptAccountDetection(3, null, now), {
+    attempt: true,
+    isCooldownRetry: true,
+  });
+});
+
+test('recurring series id extraction from bare event ids', () => {
+  assert.equal(getRecurringSeriesIdFromEventId('series123_20260326T120000Z'), 'series123');
+  assert.equal(getRecurringSeriesIdFromEventId('plainEvent'), undefined);
+  // Imported events can have ids starting with an underscore.
+  assert.equal(getRecurringSeriesIdFromEventId('_abc123'), undefined);
+  assert.equal(getRecurringSeriesIdFromEventId(undefined), undefined);
+  assert.equal(getRecurringSeriesIdFromEventId(42 as any), undefined);
+});
+
+test('resolveSyncAccounts falls back to the legacy account id', () => {
+  assert.deepEqual(
+    resolveSyncAccounts({
+      googleAccountId: 'legacy',
+      sourceGoogleAccountId: null,
+      targetGoogleAccountId: 'target',
+    }),
+    { sourceAccountId: 'legacy', targetAccountId: 'target' }
+  );
+  assert.deepEqual(
+    resolveSyncAccounts({ googleAccountId: 'legacy' }),
+    { sourceAccountId: 'legacy', targetAccountId: 'legacy' }
   );
 });

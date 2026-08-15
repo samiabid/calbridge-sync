@@ -28,7 +28,6 @@ export interface EventSkipReason {
 
 export interface CancellationState {
   cancelledEventIds: Set<string>;
-  bulkCancelledSeriesIds: Set<string>;
 }
 
 export function normalizeRsvpStatuses(input: unknown): RsvpStatus[] {
@@ -211,28 +210,14 @@ export function getRecurringSeriesId(event: any): string | undefined {
 
 export function buildCancellationState(events: any[]): CancellationState {
   const cancelledEventIds = new Set<string>();
-  const cancelledSeriesCounts = new Map<string, number>();
 
   for (const event of events) {
     if (event?.status !== 'cancelled' || !event?.id) continue;
     cancelledEventIds.add(event.id);
-    const recurringSeriesId = getRecurringSeriesId(event);
-    if (!recurringSeriesId) continue;
-    cancelledSeriesCounts.set(
-      recurringSeriesId,
-      (cancelledSeriesCounts.get(recurringSeriesId) || 0) + 1
-    );
   }
-
-  const bulkCancelledSeriesIds = new Set(
-    Array.from(cancelledSeriesCounts.entries())
-      .filter(([, count]) => count > 1)
-      .map(([seriesId]) => seriesId)
-  );
 
   return {
     cancelledEventIds,
-    bulkCancelledSeriesIds,
   };
 }
 
@@ -245,8 +230,7 @@ export function shouldSkipActiveEventDueToCancellation(
     return true;
   }
 
-  const recurringSeriesId = getRecurringSeriesId(event);
-  return Boolean(recurringSeriesId && state.bulkCancelledSeriesIds.has(recurringSeriesId));
+  return false;
 }
 
 // The next webhook fetch must start no later than this run's fetch start:

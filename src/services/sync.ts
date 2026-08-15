@@ -34,6 +34,7 @@ import {
   buildBackfillDirectionContexts,
   type BackfillDirectionContext,
 } from './backfillLogic';
+import { getRecurrenceIdentity } from './recurrenceLogic';
 
 const MAX_INVALID_GRANT_FAILURES = 200;
 const INITIAL_SYNC_PAST_MONTHS = 2;
@@ -257,9 +258,11 @@ async function replaceSyncedEventMapping(
   sourceEventId: string,
   sourceCalendarId: string,
   targetEventId: string,
-  targetCalendarId: string
+  targetCalendarId: string,
+  sourceEvent?: any
 ) {
   const lockKey = `${syncId}:${sourceCalendarId}:${sourceEventId}`;
+  const recurrence = getRecurrenceIdentity(sourceEvent);
 
   await prisma.$transaction(async (tx) => {
     // Serialize mapping replacement per source event to avoid duplicate mappings during concurrent webhooks.
@@ -281,6 +284,8 @@ async function replaceSyncedEventMapping(
         data: {
           targetEventId,
           targetCalendarId,
+          sourceRecurringEventId: recurrence.recurringEventId,
+          sourceOriginalStart: recurrence.originalStart,
           lastSyncedAt: new Date(),
         },
       });
@@ -292,6 +297,8 @@ async function replaceSyncedEventMapping(
           sourceCalendarId,
           targetEventId,
           targetCalendarId,
+          sourceRecurringEventId: recurrence.recurringEventId,
+          sourceOriginalStart: recurrence.originalStart,
         },
       });
     }
@@ -848,6 +855,13 @@ export async function performInitialSync(
         futureWindowEnd
       );
       directions.push(summary);
+      const horizonField =
+        context.direction === 'source_to_target'
+          ? 'sourceRecurrenceHorizon'
+          : 'targetRecurrenceHorizon';
+      if (summary.failed === 0) {
+        await updateSyncIfExists(syncId, { [horizonField]: futureWindowEnd });
+      }
       logInfo('initial_sync_direction_completed', {
         syncId,
         mode: syncStartMode,
@@ -1014,6 +1028,80 @@ async function performBackfillDirection(
         eventId: event.id,
         error: summary.error,
       });
+    }
+  }
+
+  return summary;
+}
+
+export interface RecurrenceHorizonMaintenanceSummary {
+  checkedDirections: number;
+  extendedDirections: number;
+  failedDirections: number;
+}
+
+export async function runRecurrenceHorizonMaintenance(
+  now: Date = new Date()
+): Promise<RecurrenceHorizonMaintenanceSummary> {
+  const threshold = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const nextHorizon = getSyncFutureWindowEnd(now);
+  const syncs = await prisma.sync.findMany({
+    where: {
+      isActive: true,
+      OR: [
+        { sourceRecurrenceHorizon: { lte: threshold } },
+        { isTwoWay: true, targetRecurrenceHorizon: { lte: threshold } },
+      ],
+    },
+  });
+  const summary: RecurrenceHorizonMaintenanceSummary = {
+    checkedDirections: 0,
+    extendedDirections: 0,
+    failedDirections: 0,
+  };
+
+  for (const sync of syncs) {
+    const contexts = buildBackfillDirectionContexts(sync);
+    for (const context of contexts) {
+      const horizonField =
+        context.direction === 'source_to_target'
+          ? 'sourceRecurrenceHorizon'
+          : 'targetRecurrenceHorizon';
+      const currentHorizon = (sync as any)[horizonField] as Date | null;
+      if (!currentHorizon || currentHorizon > threshold) continue;
+
+      summary.checkedDirections += 1;
+      const overlapStart = new Date(currentHorizon.getTime() - 24 * 60 * 60 * 1000);
+      try {
+        const directionSummary = await performBackfillDirection(
+          sync.id,
+          sync.userId,
+          context,
+          now,
+          overlapStart,
+          nextHorizon
+        );
+        if (directionSummary.failed > 0) {
+          throw new Error(directionSummary.error || `${directionSummary.failed} event(s) failed`);
+        }
+        await updateSyncIfExists(sync.id, { [horizonField]: nextHorizon });
+        summary.extendedDirections += 1;
+        logInfo('recurrence_horizon_extended', {
+          syncId: sync.id,
+          direction: context.direction,
+          previousHorizon: currentHorizon.toISOString(),
+          nextHorizon: nextHorizon.toISOString(),
+          scanned: directionSummary.scanned,
+          synced: directionSummary.synced,
+        });
+      } catch (error) {
+        summary.failedDirections += 1;
+        logError('recurrence_horizon_extension_failed', {
+          syncId: sync.id,
+          direction: context.direction,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
@@ -1361,7 +1449,8 @@ export async function syncEvent(
         event.id,
         sourceCalendarId,
         existingSync.targetEventId,
-        targetCalendarId
+        targetCalendarId,
+        event
       );
       await clearInvalidGrantFailures(syncId);
       await resolveSyncFailureByContext({
@@ -1722,7 +1811,8 @@ async function createSyncedEvent(
       event.id,
       sourceCalendarId,
       createdOrUpdatedTargetEventId,
-      targetCalendarId
+      targetCalendarId,
+      event
     );
     await clearInvalidGrantFailures(syncId);
     await resolveSyncFailureByContext({
@@ -1804,15 +1894,9 @@ export async function handleEventDeletion(
   const recurringSeriesId =
     options?.recurringEventId || getRecurringSeriesIdFromEventId(eventId) || null;
 
-  // A cancelled event with no underscore in its id and no recurringEventId is
-  // a series master: sweep its instance mappings too, so instances outside
-  // the webhook delta window are still cleaned up.
-  const isSeriesMasterCancellation = !options?.recurringEventId && !eventId.includes('_');
-  const seriesSweepId = options?.isBulkSeriesCancellation
-    ? recurringSeriesId
-    : isSeriesMasterCancellation
-      ? eventId
-      : null;
+  // Series-wide deletion must be explicitly authorized by an authoritative
+  // recurring-master change. Event-id shape and cancellation counts are not proof.
+  const seriesSweepId = options?.isBulkSeriesCancellation ? recurringSeriesId : null;
 
   if (seriesSweepId) {
     const alreadyMatched = new Set(syncedEventsToDelete.map((mapping) => mapping.id));
@@ -1822,6 +1906,7 @@ export async function handleEventDeletion(
           syncId,
           sourceCalendarId,
           OR: [
+            { sourceRecurringEventId: seriesSweepId },
             { sourceEventId: seriesSweepId },
             { sourceEventId: { startsWith: `${seriesSweepId}_` } },
           ],

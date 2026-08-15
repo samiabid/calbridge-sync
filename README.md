@@ -34,6 +34,8 @@ Screenshots use fictional calendar names and example email addresses.
 - ✅ **Event Title Identifier**: Append static text to copied titles or use it as a custom title when source titles are hidden
 - ✅ **Safe Two-Way Backfills**: Two-way runs scan both calendars sequentially, with persisted run state and concurrent-run protection
 - ✅ **Invite Deduplication**: Matching native Google invites are skipped by `iCalUID` and recurring occurrence instead of cloned twice
+- ✅ **Series-Aware Recurrence**: Tracks recurring masters, moved exceptions, and cancelled occurrences using Google recurrence identity
+- ✅ **Incremental Catch-Up**: Durable Google sync tokens and daily catch-up prevent changes being lost during downtime
 - ✅ **Event-Level Dashboard**: Inspect live source events, statuses, failures, skips, and force-sync individual events
 - ✅ **Read-Only Production Diagnostics**: Detect duplicate mappings, webhook gaps, open failures, and disconnected accounts without cleanup side effects
 - ✅ **Rate Limit Resilience**: Automatic retry/backoff for Google API 429/quota-style responses
@@ -280,6 +282,7 @@ GET /sync/diagnostics
 The diagnostics response is read-only and reports:
 - duplicate `SyncedEvent` mappings for the same source event
 - active syncs with missing or expired webhook channel metadata
+- active directions missing a Google sync token or carrying an expired recurrence horizon
 - open sync failures
 - connected Google accounts that cannot currently list calendars
 
@@ -291,7 +294,11 @@ The sync path now keeps one active mapping for each `syncId + sourceCalendarId +
 
 New target clones use deterministic event IDs where Google Calendar allows it. This reduces duplicate target clones when multiple webhook deliveries process the same source event concurrently.
 
-Webhook processing uses an overlap-safe watermark based on observed event update times rather than blindly advancing to `now`. This can intentionally reprocess a small recent window; idempotent mapping logic should absorb that overlap.
+Webhook processing uses Google incremental sync tokens. Tokens advance only after every returned change succeeds; a failed event leaves the previous token in place for a later retry. Expired tokens trigger a fresh baseline plus automatic reconciliation.
+
+Recurring masters are expanded through Google’s instances endpoint only inside the configured window. Individual exceptions are keyed by `recurringEventId + originalStartTime`, and multiple cancelled occurrences never imply a whole-series deletion. A series-wide sweep requires an authoritative cancelled recurring master.
+
+Backfills persist a per-direction recurrence horizon. Daily post-renewal maintenance catches up active sync tokens and extends horizons that are within 14 days of expiry, keeping long-running series materialized without repeated manual backfills.
 
 Webhook renewal now includes active syncs with missing channel metadata and attempts to stop old Google channels after replacement channels are successfully registered.
 
@@ -331,6 +338,7 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
 5. **Two-Way**: If enabled, changes flow in both directions
 6. **Safe Recovery**: You can manually rerun missed backfill without recreating the sync. Two-way runs process both directions, while one-way runs retain source-to-target behavior.
 7. **Native Invite Safety**: Before creating an unmapped clone, the app checks for the same Google `iCalUID` on the destination. Recurring events also require the same original occurrence time. Native events are never adopted, updated, mapped, or deleted by this check.
+8. **Recurring Event Safety**: Series changes expand a bounded set of occurrences, while moved and cancelled exceptions remain independently addressable.
 
 ## Architecture
 
@@ -425,9 +433,12 @@ Webhook renewal now includes active syncs with missing channel metadata and atte
   - Safe approach: only delete events in the destination calendar that were created by this sync (`privateExtendedProperty syncId=<SYNC_ID>`) and only from a chosen start date.
   - Do not run broad calendar deletes; always scope by both destination calendar ID and sync ID.
 - Google reports rate-limit exceeded during webhook or backfill processing.
-  - Cause: updated recurring events can expand into a very large number of future instances.
-  - Fix: current webhook and initial backfill reads are bounded by `SYNC_FUTURE_DAYS` with a default of 365 days.
+  - Cause: a large backfill or a recurring series with many instances can consume Calendar API quota.
+  - Fix: recurring master changes expand through a bounded instances request, while ordinary webhook catch-up uses unexpanded Google sync-token deltas. `SYNC_FUTURE_DAYS` defaults to 365.
   - Avoid repeatedly re-running backfill while rate-limited; let webhook processing catch up after the bounded-window fix is deployed.
+- Recurring changes do not appear after the app was offline.
+  - Check read-only diagnostics for `missing_sync_token` and inspect logs for `webhook_sync_token_expired`.
+  - The daily webhook-renewal workflow schedules catch-up automatically. A token-expiry recovery also starts reconciliation without deleting native calendar events.
 
 ### Deploy Checklist for These Fixes
 
