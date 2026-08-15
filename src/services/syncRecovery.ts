@@ -10,6 +10,7 @@ import {
 } from './syncAudit';
 import { resolveSyncAccounts } from './syncLogic';
 import { prisma } from './prisma';
+import { isGoogleCalendarEventGoneError } from './googleErrors';
 
 
 function getDirectionContext(sync: any, direction: SyncDirection) {
@@ -249,8 +250,7 @@ export async function deleteStaleTargetClone(failureId: string, userId: string) 
         `deleting stale target clone ${failure.targetEventId}`
       );
     } catch (error: any) {
-      const status = error?.code || error?.response?.status;
-      if (status !== 404) {
+      if (!isGoogleCalendarEventGoneError(error)) {
         throw error;
       }
     }

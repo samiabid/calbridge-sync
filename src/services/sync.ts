@@ -39,6 +39,7 @@ import {
   HEAVY_CALENDAR_OPERATION_LEASE,
   withOperationLease,
 } from './operationLease';
+import { isGoogleCalendarEventGoneError } from './googleErrors';
 
 const MAX_INVALID_GRANT_FAILURES = 200;
 const INITIAL_SYNC_PAST_MONTHS = 2;
@@ -901,7 +902,7 @@ export async function deleteSync(
           targetCalendarId: sync.targetCalendarId,
         });
       } catch (error: any) {
-        if (error.code !== 404) {
+        if (!isGoogleCalendarEventGoneError(error)) {
           logError('synced_event_delete_failed', {
             syncId: sync.id,
             targetEventId: syncedEvent.targetEventId,
@@ -2134,7 +2135,7 @@ export async function handleEventDeletion(
       shouldDeleteMapping = true;
     } catch (error: any) {
       const status = getErrorStatus(error);
-      if (status === 404) {
+      if (status === 404 || status === 410) {
         // Event is already gone on target calendar; remove stale mapping.
         shouldDeleteMapping = true;
       } else {

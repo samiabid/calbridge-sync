@@ -1,4 +1,5 @@
 import { getAuthenticatedCalendar } from './calendar';
+import { isGoogleCalendarEventGoneError } from './googleErrors';
 import { withRateLimitRetry } from './rateLimit';
 import { handleEventDeletion, syncEvent } from './sync';
 import { recordSyncAudit, type SyncDirection } from './syncAudit';
@@ -425,8 +426,7 @@ export async function cleanupSyncOrphanClone(
       `deleting orphan target event ${input.targetEventId}`
     );
   } catch (error: any) {
-    const status = error?.code || error?.response?.status;
-    if (status !== 404) {
+    if (!isGoogleCalendarEventGoneError(error)) {
       throw error;
     }
   }
